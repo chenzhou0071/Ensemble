@@ -58,8 +58,8 @@ React SPA ──HTTP / WebSocket──▶ FastAPI 接入层（房间、TurnBuffe
 3. validate        结构化校验，失败 repair 重试 1 次
 4. resolve_checks  纯代码掷骰（DiceRecord 含 seed 与成功等级）
 5. memory_query    失败降级为"无长期记忆"继续
-6. npc_respond     NPC 子图 Send 并行（反应 + proactive 触发）
-7. gm_narrate      千问；流式输出叙事
+6. npc_respond     NPC 子图 Send 并行；产出结构化反应 {npc_id, speech, action}，不推送前端
+7. gm_narrate      千问；统一编排叙事顺序（GM 描述 + NPC 台词嵌入），流式推送
 8. post_turn       落库、摘要更新、场景持久化、广播
 9. wait_input      interrupt 挂起 → 打开下一轮输入窗口
 ```
@@ -78,19 +78,23 @@ React SPA ──HTTP / WebSocket──▶ FastAPI 接入层（房间、TurnBuffe
 
 `scene_transition` 可为 null。**NPC 主动行为由 GM 统一裁决**：守卫盘问等"场景被动触发"也走 `proactive_npc_triggers`，GM 控制叙事节奏。
 
+**叙事有序性**：NPC 台词**不独立推送前端**——`npc_respond` 产出结构化反应后，由 `gm_narrate` 统一编排顺序（GM 描述与 NPC 台词嵌入到叙事流的正确位置），再流式推送；前端按 speaker 标记渲染说话人（NPC 高亮/头像），玩家只看到一个有序叙事流。`dice / scene_changed / state` 等技术事件仍走独立事件通道（不参与叙事顺序）。
+
 ### 4.2 TurnBuffer ↔ interrupt 对接
 
 - 状态机：`IDLE → COLLECTING(turn_id) → RESUME`
 - **挂起检测**：API 层是图的唯一驱动者；每轮图执行结束检查 `get_state(config)`，停在 `wait_input`（interrupt 生效）则开窗 `COLLECTING`。
 - **收集**：活跃玩家（= 已加入战役且在线）每人一条，后发覆盖前发（允许改主意）；全员提交或超时（默认 60s，配置化）→ 关窗；掉线与超时未交均记入 `skipped`。
-- **恢复**：关窗后组装 `TurnInputs {turn_id, inputs: [{player_id, character_id, text, submitted_at}], skipped: []}`（按提交时间排序），调用 `graph.invoke(Command(resume=TurnInputs), config={thread_id: campaign_id})` 一次性恢复；`intake` 节点接收。
+- **恢复**：关窗后组装 `TurnInputs {turn_id, inputs: [{player_id, character_id, text, submitted_at}], skipped: []}`（按提交时间排序），调用 `graph.invoke(Command(resume=TurnInputs), config={thread_id: 当前分支的 thread_id})` 一次性恢复；`intake` 节点接收。
 - **窗口外输入**：图 RUNNING 期间到达的行动进 `pending_next` 暂存，下一窗口开启时预填为已提交。
 - **单人（N=1）**：提交后 2 秒防抖关窗（留编辑余地）。
 - **测试用例**：单提交 / 双提交 / 超时 / 窗口外输入（四种场景）。
 
 ### 4.3 场景切换链（无竞态）
 
-`gm_decide` 输出 `scene_transition` → 立即写入 `state.current_scene` → 下游节点（memory_query / npc_respond）**只读 state、不查库**，以新场景上下文工作（如进城主府立刻触发守卫）→ `gm_narrate` 叙事描述移动 → `post_turn` 持久化到领域库并广播 `scene_changed` 技术事件（前端切换场景与 NPC 区）。领域库是长期权威，本回合内以 state 为准。
+`gm_decide` 输出 `scene_transition` → 立即写入 `state.current_scene` → 下游节点（memory_query / npc_respond）**只读 state、不查 L2 领域库**，以新场景上下文工作（如进城主府立刻触发守卫）→ `gm_narrate` 叙事描述移动 → `post_turn` 持久化到领域库并广播 `scene_changed` 技术事件（前端切换场景与 NPC 区）。领域库是长期权威，本回合内以 state 为准。
+
+**L2 加载时机（写死）**：回合开始由 `intake` 一次性把本回合所需 L2 动态状态加载进 state——当前场景指针、**全体 NPC 动态态度**、玩家角色卡摘要（数据量小，全量加载无压力）；此后直到 `post_turn` 写回为止，所有下游节点**只读 state、不查 L2 领域库**。`memory_query` 访问的是 L3 记忆服务（独立接口），不属于 L2 领域库，不受此约束；场景→NPC 的静态映射来自模组 Module（内存内容），场景切换无需任何库读取。
 
 ## 5. 状态模型
 
@@ -105,7 +109,7 @@ React SPA ──HTTP / WebSocket──▶ FastAPI 接入层（房间、TurnBuffe
 ### 5.2 骰子与可复现
 
 - 实现：`seed = secrets.randbits(64)` → `rng = random.Random(seed)` → 掷骰。真随机与可复现兼得。
-- `DiceRecord`：`{roll_id, campaign_id, turn_id, actor, skill, difficulty, skill_value, roll, success_level, seed, created_at}`。
+- `DiceRecord`：`{roll_id, campaign_id, branch_id, turn_id, actor, skill, difficulty, skill_value, roll, success_level, seed, created_at}`。
 - 读档语义：默认重掷（"重新尝试"体验）；`seed` 留档供调试、回放与测试。
 - 测试：注入固定 seed → 全链路确定性回放。
 
@@ -166,13 +170,17 @@ ensemble/
 
 ## 7. 存档与读档语义
 
-- **统一关联键 `campaign_id`**，同时就是 LangGraph 的 `thread_id`——一个 campaign = 一个 thread = 一个 session，不引入第三个名词。
+- **统一关联键 `campaign_id`**；每分支一个 thread：`thread_id = {campaign_id}@{branch_id}`（主分支 `branch_id = main`）。一个 campaign 默认一个主分支 = 一个 thread。
 - **存档 = 双源**：① checkpointer thread 快照（L1 图状态）；② 领域库（L2 权威）。存档点 = `post_turn` 结束时的 turn 边界快照，形成**存档时间线**。
-- **领域库 append-only + 版本化**：所有事件与状态变更带 `turn_id`；当前值按"目标 turn 之前的最新版本"查询；回滚即查询历史版本，不做物理删除（event-sourcing-lite）。
+- **领域库 append-only + 版本化 + 分叉**：所有事件与状态变更带 `branch_id + turn_id`；当前值按"（分支内）目标 turn 之前的最新版本"查询；不做物理删除（event-sourcing-lite）。
+- **分叉时间线**：`restore(turn_id)` 从该历史点**创建新分支并切换**——后续事件写入新 `branch_id`，原分支完整保留、可随时切回；`timeline` 默认展示当前分支，可列出全部分支。
 - **两种操作区分**：
-  - 断点续玩：恢复最新 checkpoint，不重掷（M2 出口标准）；
-  - 读档回滚：选定历史 turn，恢复该 checkpoint + 按目标 turn 重建 L2，骰子默认重掷、seed 留档。
-- **对外 API**：`GET /campaigns/{id}/timeline`（存档时间线）→ `POST /campaigns/{id}/restore {turn_id}`。
+  - 断点续玩：恢复当前分支最新 checkpoint，不重掷（M2 出口标准）；
+  - 读档回滚：选定历史 turn → 新建分支 + 恢复该 checkpoint + 按目标 turn 重建 L2，骰子默认重掷、seed 留档。
+- **对外 API**：
+  - `GET /campaigns/{id}/timeline`（分支与回合时间线，默认当前分支）
+  - `POST /campaigns/{id}/restore {turn_id}`（从历史回合创建新分支并切换）
+  - `POST /campaigns/{id}/switch {branch_id}`（切换到既有分支）
 
 ## 8. 错误处理与降级矩阵
 
