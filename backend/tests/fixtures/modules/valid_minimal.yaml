@@ -1,0 +1,11 @@
+meta: { id: t-min, title: 迷你模组, version: "0.1" }
+opening: { narration: 你们来到村口。, scene_id: gate }
+scenes:
+  - { id: gate, name: 村口, npcs: [guard], exits: [tavern] }
+  - { id: tavern, name: 酒馆, clues: [c1] }
+npcs:
+  - { id: guard, name: 王守卫, persona: 多疑的老兵, initial_attitude: 40 }
+clues:
+  - { id: c1, content: 酒馆里流传着磨坊的传闻, unlocks: [scene:tavern] }
+endings:
+  - { id: e1, scene: tavern, condition: 揭开真相 }
