@@ -1,0 +1,72 @@
+"""模组内容模型：内容与引擎分离，字段即公开契约。"""
+from pydantic import BaseModel, Field
+
+
+class ModuleMeta(BaseModel):
+    id: str
+    title: str
+    author: str = ""
+    version: str = "0.1"
+    system: str = "coc-lite"
+
+
+class Opening(BaseModel):
+    narration: str
+    scene_id: str
+    player_goal: str = ""
+
+
+class Scene(BaseModel):
+    id: str
+    name: str
+    description: str = ""
+    npcs: list[str] = Field(default_factory=list)
+    exits: list[str] = Field(default_factory=list)
+    clues: list[str] = Field(default_factory=list)
+
+
+class NpcDef(BaseModel):
+    id: str
+    name: str
+    persona: str
+    knowledge: list[str] = Field(default_factory=list)
+    initial_attitude: int = 50
+
+
+class Clue(BaseModel):
+    id: str
+    content: str
+    unlocks: list[str] = Field(default_factory=list)
+
+
+class Ending(BaseModel):
+    id: str
+    scene: str
+    condition: str
+
+
+class Module(BaseModel):
+    meta: ModuleMeta
+    opening: Opening
+    scenes: list[Scene]
+    npcs: list[NpcDef]
+    clues: list[Clue]
+    endings: list[Ending]
+
+    def scene(self, scene_id: str) -> Scene:
+        for s in self.scenes:
+            if s.id == scene_id:
+                return s
+        raise KeyError(f"scene not found: {scene_id}")
+
+    def npc(self, npc_id: str) -> NpcDef:
+        for n in self.npcs:
+            if n.id == npc_id:
+                return n
+        raise KeyError(f"npc not found: {npc_id}")
+
+    def ending(self, ending_id: str) -> Ending:
+        for e in self.endings:
+            if e.id == ending_id:
+                return e
+        raise KeyError(f"ending not found: {ending_id}")
