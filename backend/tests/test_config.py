@@ -8,6 +8,16 @@ def test_defaults_and_env_override(monkeypatch):
     monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
     assert load_settings().deepseek_api_key == "sk-test"
 
+def test_budget_caps_env_override(monkeypatch):
+    monkeypatch.delenv("ENSEMBLE_TURN_TOKEN_CAP", raising=False)
+    monkeypatch.delenv("ENSEMBLE_CAMPAIGN_COST_CAP_USD", raising=False)
+    s = load_settings()
+    assert s.turn_token_cap == 30000 and s.campaign_cost_cap_usd == 10.0
+    monkeypatch.setenv("ENSEMBLE_TURN_TOKEN_CAP", "100")
+    monkeypatch.setenv("ENSEMBLE_CAMPAIGN_COST_CAP_USD", "999999")
+    s2 = load_settings()
+    assert s2.turn_token_cap == 100 and s2.campaign_cost_cap_usd == 999999.0
+
 def test_pricing_loaded_from_yaml(tmp_path):
     p = tmp_path / "pricing.yaml"
     p.write_text("models:\n  m1: {input_per_1k: 0.001, output_per_1k: 0.002}\n", encoding="utf-8")

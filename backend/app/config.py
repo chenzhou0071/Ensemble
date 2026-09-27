@@ -42,4 +42,6 @@ def load_settings() -> Settings:
         sqlite_path=os.environ.get("ENSEMBLE_SQLITE_PATH", "ensemble.db"),
         qwen_api_key=os.environ.get("DASHSCOPE_API_KEY"),
         deepseek_api_key=os.environ.get("DEEPSEEK_API_KEY"),
+        turn_token_cap=int(os.environ.get("ENSEMBLE_TURN_TOKEN_CAP", "30000")),
+        campaign_cost_cap_usd=float(os.environ.get("ENSEMBLE_CAMPAIGN_COST_CAP_USD", "10.0")),
     )
