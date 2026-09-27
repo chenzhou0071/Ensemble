@@ -34,7 +34,7 @@ class Settings(BaseModel):
     request_timeout_seconds: int = 60
     turn_window_seconds: int = 60
     turn_token_cap: int = 30000
-    campaign_cost_cap_usd: float = 2.0
+    campaign_cost_cap_usd: float = 10.0
 
 
 def load_settings() -> Settings:
