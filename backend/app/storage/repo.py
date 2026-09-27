@@ -1,9 +1,11 @@
 """L2 领域仓储：append-only、版本化、分支隔离。"""
+import json
 import uuid
 
 from sqlmodel import Session, select
 
-from app.storage.models import Branch, Campaign
+from app.storage.models import (Branch, Campaign, CharacterStateRow, GameEventRow,
+                                StateSnapshotRow, SummaryRow)
 
 
 class SqliteRepository:
@@ -60,3 +62,92 @@ class SqliteRepository:
 
     def thread_id_for(self, branch: Branch) -> str:
         return branch.id
+
+    # ---------- events ----------
+
+    def add_event(self, campaign_id: str, branch_id: str, turn_id: int, type: str,
+                  payload: dict, visibility: str = "all") -> int:
+        with Session(self.engine) as s:
+            last = s.exec(select(GameEventRow).where(GameEventRow.branch_id == branch_id)
+                          .order_by(GameEventRow.seq.desc())).first()
+            seq = (last.seq + 1) if last else 1
+            s.add(GameEventRow(campaign_id=campaign_id, branch_id=branch_id, turn_id=turn_id,
+                               seq=seq, type=type, visibility=visibility,
+                               payload_json=json.dumps(payload, ensure_ascii=False)))
+            s.commit()
+        return seq
+
+    def list_events(self, campaign_id: str, branch_id: str, upto_turn: int | None = None,
+                    types: list[str] | None = None) -> list[GameEventRow]:
+        q = select(GameEventRow).where(GameEventRow.branch_id == branch_id)
+        if upto_turn is not None:
+            q = q.where(GameEventRow.turn_id <= upto_turn)
+        if types is not None:
+            q = q.where(GameEventRow.type.in_(types))
+        q = q.order_by(GameEventRow.seq)
+        with Session(self.engine) as s:
+            return list(s.exec(q).all())
+
+    # ---------- versioned state ----------
+
+    def append_state(self, campaign_id: str, branch_id: str, turn_id: int, data: dict) -> None:
+        with Session(self.engine) as s:
+            s.add(StateSnapshotRow(campaign_id=campaign_id, branch_id=branch_id,
+                                   turn_id=turn_id,
+                                   data_json=json.dumps(data, ensure_ascii=False)))
+            s.commit()
+
+    def get_state_at(self, campaign_id: str, branch_id: str, turn_id: int) -> dict | None:
+        q = (select(StateSnapshotRow).where(StateSnapshotRow.branch_id == branch_id,
+                                            StateSnapshotRow.turn_id <= turn_id)
+             .order_by(StateSnapshotRow.turn_id.desc(), StateSnapshotRow.id.desc()))
+        with Session(self.engine) as s:
+            row = s.exec(q).first()
+        return json.loads(row.data_json) if row else None
+
+    def append_character(self, campaign_id: str, branch_id: str, turn_id: int,
+                         character_id: str, data: dict) -> None:
+        with Session(self.engine) as s:
+            s.add(CharacterStateRow(campaign_id=campaign_id, branch_id=branch_id,
+                                    turn_id=turn_id, character_id=character_id,
+                                    data_json=json.dumps(data, ensure_ascii=False)))
+            s.commit()
+
+    def get_character_at(self, campaign_id: str, branch_id: str, turn_id: int,
+                         character_id: str) -> dict | None:
+        q = (select(CharacterStateRow)
+             .where(CharacterStateRow.branch_id == branch_id,
+                    CharacterStateRow.turn_id <= turn_id,
+                    CharacterStateRow.character_id == character_id)
+             .order_by(CharacterStateRow.turn_id.desc(), CharacterStateRow.id.desc()))
+        with Session(self.engine) as s:
+            row = s.exec(q).first()
+        return json.loads(row.data_json) if row else None
+
+    def list_characters_at(self, campaign_id: str, branch_id: str, turn_id: int) -> list[dict]:
+        q = (select(CharacterStateRow)
+             .where(CharacterStateRow.branch_id == branch_id,
+                    CharacterStateRow.turn_id <= turn_id)
+             .order_by(CharacterStateRow.character_id,
+                       CharacterStateRow.turn_id.desc(), CharacterStateRow.id.desc()))
+        with Session(self.engine) as s:
+            rows = s.exec(q).all()
+        best: dict[str, dict] = {}
+        for row in rows:
+            best.setdefault(row.character_id, json.loads(row.data_json))
+        return list(best.values())
+
+    # ---------- summaries ----------
+
+    def append_summary(self, campaign_id: str, branch_id: str, upto_turn: int,
+                       content: str) -> None:
+        with Session(self.engine) as s:
+            s.add(SummaryRow(campaign_id=campaign_id, branch_id=branch_id,
+                             upto_turn=upto_turn, content=content))
+            s.commit()
+
+    def latest_summary(self, campaign_id: str, branch_id: str) -> SummaryRow | None:
+        q = (select(SummaryRow).where(SummaryRow.branch_id == branch_id)
+             .order_by(SummaryRow.upto_turn.desc(), SummaryRow.id.desc()))
+        with Session(self.engine) as s:
+            return s.exec(q).first()
