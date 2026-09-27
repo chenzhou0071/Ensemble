@@ -4,8 +4,8 @@ import uuid
 
 from sqlmodel import Session, select
 
-from app.storage.models import (Branch, Campaign, CharacterStateRow, GameEventRow,
-                                StateSnapshotRow, SummaryRow)
+from app.storage.models import (Branch, Campaign, CharacterStateRow, DiceRecordRow,
+                                GameEventRow, StateSnapshotRow, SummaryRow, UsageRow)
 
 
 class SqliteRepository:
@@ -151,3 +151,59 @@ class SqliteRepository:
              .order_by(SummaryRow.upto_turn.desc(), SummaryRow.id.desc()))
         with Session(self.engine) as s:
             return s.exec(q).first()
+
+    # ---------- dice & usage ----------
+
+    def add_dice_record(self, campaign_id: str, branch_id: str, turn_id: int, actor: str,
+                        skill: str, skill_value: int, difficulty: str, roll: int,
+                        level: str, seed: int) -> None:
+        with Session(self.engine) as s:
+            s.add(DiceRecordRow(campaign_id=campaign_id, branch_id=branch_id, turn_id=turn_id,
+                                actor=actor, skill=skill, skill_value=skill_value,
+                                difficulty=difficulty, roll=roll, level=level, seed=seed))
+            s.commit()
+
+    def list_dice_records(self, campaign_id: str, branch_id: str,
+                          turn_id: int | None = None) -> list[DiceRecordRow]:
+        q = select(DiceRecordRow).where(DiceRecordRow.branch_id == branch_id)
+        if turn_id is not None:
+            q = q.where(DiceRecordRow.turn_id == turn_id)
+        q = q.order_by(DiceRecordRow.id)
+        with Session(self.engine) as s:
+            return list(s.exec(q).all())
+
+    def record_usage(self, campaign_id: str, branch_id: str, turn_id: int, role: str,
+                     model: str, tokens_in: int, tokens_out: int, cost_usd: float,
+                     latency_ms: int) -> None:
+        with Session(self.engine) as s:
+            s.add(UsageRow(campaign_id=campaign_id, branch_id=branch_id, turn_id=turn_id,
+                           role=role, model=model, tokens_in=tokens_in, tokens_out=tokens_out,
+                           cost_usd=cost_usd, latency_ms=latency_ms))
+            s.commit()
+
+    def turn_token_total(self, campaign_id: str, branch_id: str, turn_id: int) -> int:
+        q = select(UsageRow).where(UsageRow.branch_id == branch_id, UsageRow.turn_id == turn_id)
+        with Session(self.engine) as s:
+            rows = s.exec(q).all()
+        return sum(r.tokens_in + r.tokens_out for r in rows)
+
+    def campaign_cost_total(self, campaign_id: str) -> float:
+        q = select(UsageRow).where(UsageRow.campaign_id == campaign_id)
+        with Session(self.engine) as s:
+            rows = s.exec(q).all()
+        return round(sum(r.cost_usd for r in rows), 6)
+
+    # ---------- branch history ----------
+
+    def branch_history_events(self, campaign_id: str, branch_id: str) -> list[GameEventRow]:
+        chain: list[Branch] = []
+        cur = self.get_branch(branch_id)
+        while cur is not None:
+            chain.append(cur)
+            cur = self.get_branch(cur.parent_branch_id) if cur.parent_branch_id else None
+        chain.reverse()
+        out: list[GameEventRow] = []
+        for i, b in enumerate(chain):
+            upto = chain[i + 1].fork_turn_id if i + 1 < len(chain) else None
+            out.extend(self.list_events(campaign_id, b.id, upto_turn=upto))
+        return out
