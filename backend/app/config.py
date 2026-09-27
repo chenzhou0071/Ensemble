@@ -23,10 +23,10 @@ def load_pricing(path: str | Path) -> Pricing:
 class Settings(BaseModel):
     sqlite_path: str = "ensemble.db"
     pricing_path: str = "config/pricing.yaml"
-    gm_model: str = "qwen-plus"
-    cheap_model: str = "qwen-turbo"
-    npc_model: str = "deepseek-chat"
-    extractor_model: str = "qwen-turbo"
+    gm_model: str = "qwen3.8-flash"
+    cheap_model: str = "qwen3.8-flash"
+    npc_model: str = "deepseek-flash"
+    extractor_model: str = "qwen3.8-flash"
     qwen_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     deepseek_base_url: str = "https://api.deepseek.com/v1"
     qwen_api_key: str | None = None

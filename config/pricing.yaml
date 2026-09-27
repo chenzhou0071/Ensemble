@@ -1,5 +1,5 @@
 # 价格仅用于成本估算，请按厂商官网更新（单位：美元 / 1K tokens）
+# 换算基准：人民币按约 7.1 汇率折美元；deepseek-flash 取高峰时段、缓存未命中价（保守值）
 models:
-  qwen-plus: { input_per_1k: 0.0008, output_per_1k: 0.002 }
-  qwen-turbo: { input_per_1k: 0.0003, output_per_1k: 0.0006 }
-  deepseek-chat: { input_per_1k: 0.00027, output_per_1k: 0.0011 }
+  qwen3.8-flash: { input_per_1k: 0.000113, output_per_1k: 0.00038 }
+  deepseek-flash: { input_per_1k: 0.00028, output_per_1k: 0.00113 }

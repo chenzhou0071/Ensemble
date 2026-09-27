@@ -4,7 +4,7 @@ from app.config import load_pricing, load_settings
 def test_defaults_and_env_override(monkeypatch):
     monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
     s = load_settings()
-    assert s.gm_model == "qwen-plus" and s.turn_window_seconds == 60
+    assert s.gm_model == "qwen3.8-flash" and s.turn_window_seconds == 60
     monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
     assert load_settings().deepseek_api_key == "sk-test"
 
@@ -17,4 +17,6 @@ def test_pricing_loaded_from_yaml(tmp_path):
 def test_repo_pricing_covers_routed_models():
     repo_root = Path(__file__).resolve().parents[2]
     pricing = load_pricing(repo_root / "config" / "pricing.yaml")
-    assert {"qwen-plus", "qwen-turbo", "deepseek-chat"} <= set(pricing.models)
+    s = load_settings()
+    routed = {s.gm_model, s.cheap_model, s.npc_model, s.extractor_model}
+    assert routed <= set(pricing.models)
