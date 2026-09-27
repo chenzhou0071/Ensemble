@@ -1,0 +1,5 @@
+# 价格仅用于成本估算，请按厂商官网更新（单位：美元 / 1K tokens）
+models:
+  qwen-plus: { input_per_1k: 0.0008, output_per_1k: 0.002 }
+  qwen-turbo: { input_per_1k: 0.0003, output_per_1k: 0.0006 }
+  deepseek-chat: { input_per_1k: 0.00027, output_per_1k: 0.0011 }
