@@ -60,3 +60,20 @@ def test_update_summaries_below_threshold_skips(env):
     mem.write_event(campaign.id, b, MemoryEvent(type="note", text="一条新事件", turn_id=1))
     mem.update_summaries(campaign.id, b, turn_id=1)
     assert repo.latest_summary(campaign.id, b).content == "旧摘要"  # 未触发新摘要
+
+def test_update_summaries_passes_prior_summary_to_summarizer(env):
+    repo, campaign = env
+    b = campaign.active_branch_id
+    repo.append_summary(campaign.id, b, 0, "旧摘要")
+    captured = []
+    def summarizer(messages):
+        captured.append(messages)
+        return "新摘要"
+    mem = JournalMemory(repo, summarizer=summarizer)
+    for i in range(12):
+        mem.write_event(campaign.id, b, MemoryEvent(type="note", text=f"事件{i}", turn_id=1 + i // 3))
+    mem.update_summaries(campaign.id, b, turn_id=5)
+    user_msg = captured[0][1]
+    assert user_msg.role == "user"
+    assert user_msg.content.startswith("已有摘要：旧摘要")
+    assert "新事件：" in user_msg.content
