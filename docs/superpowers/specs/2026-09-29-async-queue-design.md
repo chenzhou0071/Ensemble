@@ -144,10 +144,10 @@ class LLMSummarizer:
 | 计划位置 | 修改 |
 |---|---|
 | backend-core（T19 之前） | **插入 Task 18b**：`tasks.py` + `scheduler.py` + `summarizer.py` + `journal.py` 签名 + `db.py` pragma + 全部测试 |
-| backend-core T21/T24 装配 | `assemble()` 改为：`memory = BackgroundSummaries(JournalMemory(repo, summarizer=LLMSummarizer(client)), queue)`；`queue.start()`；`AppContext` 增加 queue 字段，退出 `flush(2.0)` |
+| backend-core T24 + playable-web `_assemble` | `assemble()` / `SessionManager._assemble` 改为：`JournalMemory(repo, summarizer=LLMSummarizer(client))` → `BackgroundQueue(name="summary")` → `BackgroundSummaries` 包装传给图；`queue.start()`；`AppContext` 增加 queue 字段、CLI `main` 退出 `flush(2.0)`；会话 `close()` 逐 session `flush(2.0)+stop()`、切分支时旧队列 `stop()` |
 | M5-1 Graphiti | `GraphitiMemory` 事件仍同步落 L2（权威）；图谱摄取以 `(thread_id, turn_id)` 提交到第二个队列实例（`BackgroundQueue` 复用，name="graph"）；`_GraphitiAdapter` 的异步桥接不变，仅在 worker 线程内被调用；检索保持同步（M5 范围） |
 
-装配示意（T24 `assemble()` 目标形态）：
+装配示意（T24 `assemble()` 目标形态；playable-web `_assemble` 同构，另在 `close()` 逐会话 `flush(2.0)+stop()`）：
 
 ```python
 memory = JournalMemory(repo, summarizer=LLMSummarizer(client))

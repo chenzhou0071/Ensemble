@@ -2274,7 +2274,10 @@ from app.graph.main import build_checkpointer, build_game_graph
 from app.llm.client import LLMClient
 from app.llm.usage import BudgetGuard
 from app.memory.journal import JournalMemory
+from app.memory.scheduler import BackgroundSummaries
+from app.memory.summarizer import LLMSummarizer
 from app.storage.repo import SqliteRepository
+from app.tasks import BackgroundQueue
 
 _SUCCESS_LEVELS = ("critical", "extreme", "hard", "regular")
 _TICK_SECONDS = 0.05
@@ -2296,6 +2299,7 @@ class RoomSession:
     bus: EventBus
     buffer: TurnBuffer
     branch_id: str
+    queue: BackgroundQueue
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     started: bool = False
     driving: bool = False
@@ -2333,12 +2337,16 @@ class SessionManager:
                                               campaign.module_id))
         client = LLMClient(deps.settings, load_pricing(deps.settings.pricing_path),
                            usage_sink=deps.repo, model_factory=deps.model_factory)
-        graph = build_game_graph(deps.repo, module, JournalMemory(deps.repo), client,
-                                 BudgetGuard(deps.settings),
+        journal = JournalMemory(deps.repo, summarizer=LLMSummarizer(client))
+        queue = BackgroundQueue(lambda key, payload: journal.update_summaries(*payload),
+                                name="summary")
+        queue.start()
+        graph = build_game_graph(deps.repo, module, BackgroundSummaries(journal, queue),
+                                 client, BudgetGuard(deps.settings),
                                  build_checkpointer(deps.settings.sqlite_path))
         session = RoomSession(
             campaign_id=campaign_id, repo=deps.repo, settings=deps.settings,
-            module=module, graph=graph,
+            module=module, graph=graph, queue=queue,
             bus=EventBus(replay_size=deps.settings.ws_replay_size),
             buffer=TurnBuffer(window_seconds=deps.settings.turn_window_seconds,
                               single_player_debounce_seconds=(
@@ -2381,9 +2389,10 @@ class SessionManager:
     async def on_branch_switch(self, campaign_id: str) -> None:
         async with self._lock:
             old = self._sessions.pop(campaign_id, None)
-            if old is not None and old.window_task is not None \
-                    and not old.window_task.done():
-                old.window_task.cancel()
+            if old is not None:
+                if old.window_task is not None and not old.window_task.done():
+                    old.window_task.cancel()
+                old.queue.stop()          # 旧分支摘要队列：跑完在队任务后退出
             session = self._assemble(campaign_id)
             if old is not None:
                 session.bus = old.bus          # 已连接的 WS 订阅保持有效
@@ -2413,6 +2422,8 @@ class SessionManager:
         for session in list(self._sessions.values()):
             if session.window_task is not None and not session.window_task.done():
                 session.window_task.cancel()
+            session.queue.flush(2.0)      # 退出前尽力收尾摘要（丢任务无害：watermark 自愈）
+            session.queue.stop()
         self._sessions.clear()
 
     # ---------- 驱动 ----------

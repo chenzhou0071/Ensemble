@@ -104,7 +104,7 @@ README.md / .env.example           # M5-2（记忆后端 / traces / LangSmith �
     `close() -> None`
   - `GraphitiMemory(repo, graph_client: GraphClient | None = None, summarizer=None)`：实现 `MemoryService` 协议；组合 `JournalMemory`——**事件始终落 L2 事件表（权威）**，图谱仅增强：写入失败只记日志、检索失败回退关键词
   - `make_graphiti_client(settings) -> GraphClient`：延迟导入 `graphiti_core`（未安装 / 未配密码时抛异常）；`_GraphitiAdapter` 用后台线程事件循环桥接异步 API
-  - `build_memory(settings, repo) -> MemoryService`：`memory_backend == "graphiti"` 时尝试 graphiti（任何异常 → warning + 回退 `JournalMemory`），否则直接 `JournalMemory`
+  - `build_memory(settings, repo, summarizer=None) -> MemoryService`：`memory_backend == "graphiti"` 时尝试 graphiti（任何异常 → warning + 回退 `JournalMemory`），否则直接 `JournalMemory`；`summarizer`（Task 18b 的 `LLMSummarizer`）透传给底层 JournalMemory（默认 None 时保持模板兜底，兼容既有测试）
   - `Settings` 新字段：`memory_backend: str = "journal"`、`neo4j_uri: str = "bolt://localhost:7687"`、`neo4j_user: str = "neo4j"`、`neo4j_password: str | None = None`；env：`ENSEMBLE_MEMORY_BACKEND` / `NEO4J_URI` / `NEO4J_USER` / `NEO4J_PASSWORD`
 
 - [ ] **Step 1: 写失败测试**
@@ -363,16 +363,19 @@ def make_graphiti_client(settings) -> GraphClient:
     return _GraphitiAdapter(graphiti)
 
 
-def build_memory(settings, repo):
-    """按配置装配 L3：journal（默认）| graphiti（初始化失败优雅回退并告警）。"""
+def build_memory(settings, repo, summarizer=None):
+    """按配置装配 L3：journal（默认）| graphiti（初始化失败优雅回退并告警）。
+
+    summarizer 由装配层传入（Task 18b 摘要接线：LLMSummarizer），透传给底层 JournalMemory。
+    """
     if settings.memory_backend == "graphiti":
         try:
             graph = make_graphiti_client(settings)
             logger.info("L3 memory backend: graphiti")
-            return GraphitiMemory(repo, graph_client=graph)
+            return GraphitiMemory(repo, graph_client=graph, summarizer=summarizer)
         except Exception as exc:
             logger.warning("Graphiti 不可用，回退 JournalMemory：%s", exc)
-    return JournalMemory(repo)
+    return JournalMemory(repo, summarizer=summarizer)
 ```
 
 - [ ] **Step 4: 修改装配与配置（四处）**
@@ -402,11 +405,11 @@ graph = ["graphiti-core>=0.5"]
 `backend/app/cli.py`（三处）：
 - import：`from app.memory.journal import JournalMemory` → `from app.memory.graphiti import build_memory`
 - `AppContext` 的注解：`memory: JournalMemory | None` → `memory: object | None`（MemoryService 协议实现，Journal 或 Graphiti）
-- `assemble()` 内：`memory = JournalMemory(repo)` → `memory = build_memory(settings, repo)`
+- `assemble()` 内：`memory = JournalMemory(repo, summarizer=LLMSummarizer(client))`（Task 18b 接线后形态）→ `memory = build_memory(settings, repo, summarizer=LLMSummarizer(client))`；摘要队列包装（`BackgroundQueue(name="summary")` + `BackgroundSummaries` + `queue.start()` 与 `main` 的 `flush(2.0)`）保留不变
 
 `backend/app/api/session.py`（两处）：
 - import：`from app.memory.journal import JournalMemory` → `from app.memory.graphiti import build_memory`
-- `SessionManager._assemble()` 内 `build_game_graph(deps.repo, module, JournalMemory(deps.repo), client, ...)` → `build_game_graph(deps.repo, module, build_memory(deps.settings, deps.repo), client, ...)`
+- `SessionManager._assemble()` 内 `journal = JournalMemory(deps.repo, summarizer=LLMSummarizer(client))`（Task 18b 接线后形态）→ `journal = build_memory(deps.settings, deps.repo, summarizer=LLMSummarizer(client))`；`build_game_graph(..., BackgroundSummaries(journal, queue), ...)` 包装与 queue 生命周期（`queue.start()`、`close()` / 切分支时 `flush/stop`）保留不变
 
 - [ ] **Step 5: 验证通过（含全量回归）**
 

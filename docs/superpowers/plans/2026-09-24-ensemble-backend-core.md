@@ -4785,8 +4785,9 @@ git commit -m "feat(test): record/replay harness with misty hollow baseline fixt
 **Interfaces:**
 - Consumes: `assemble` 链路（Task 1-23 全部）、`build_checkpointer`/`build_game_graph`（Task 21）
 - Produces：
-  - `AppContext`（dataclass：`settings, repo, module, client, guard, memory, graph`）
+  - `AppContext`（dataclass：`settings, repo, module, client, guard, memory, graph, queue`）
   - `assemble(settings, module_path) -> AppContext`（同一 sqlite 文件承载 L2 + 检查点；`repo` 直接作为 usage_sink，签名已对齐）
+  - **异步摘要接线（Task 18b）**：`JournalMemory(repo, summarizer=LLMSummarizer(client))` + `BackgroundQueue(name="summary")` + `BackgroundSummaries` 包装进 `build_game_graph`；`main` 退出前 `queue.flush(2.0)`
   - `render_narration(segments, module) -> list[str]`（`gm` → 原文；`npc:<id>` → `【NPC 名】台词`）
   - `play_loop(graph, config, module, turn_id, input_fn, print_fn) -> str`（`"quit"` / `"paused"`；退出语：`quit/exit/q/退出`）
   - `run_play(ctx, campaign_id, input_fn=input, print_fn=print) -> str`：全新线程 → 跑开场；`next == ("wait_input",)` → **断点续玩**（打印"读取存档，继续运行"）；已结束 → 直接返回
@@ -4946,9 +4947,12 @@ from app.graph.main import build_checkpointer, build_game_graph
 from app.llm.client import LLMClient
 from app.llm.usage import BudgetGuard
 from app.memory.journal import JournalMemory
+from app.memory.scheduler import BackgroundSummaries
+from app.memory.summarizer import LLMSummarizer
 from app.rules.character import make_default_character
 from app.storage.db import init_db, make_engine
 from app.storage.repo import SqliteRepository
+from app.tasks import BackgroundQueue
 
 PLAYER_ID = "p1"
 QUIT_WORDS = {"quit", "exit", "q", "退出"}
@@ -4963,21 +4967,29 @@ class AppContext:
     guard: BudgetGuard | None
     memory: JournalMemory | None
     graph: object
+    queue: BackgroundQueue | None = None      # 摘要后台队列（Task 18b）
 
 
 def assemble(settings: Settings, module_path: str | Path) -> AppContext:
-    """装配全部组件；L2 与检查点共用同一 SQLite 文件（CLI 单进程顺序访问）。"""
+    """装配全部组件；L2 与检查点共用同一 SQLite 文件（CLI 单进程顺序访问）。
+
+    摘要接后台队列（Task 18b）：post_turn 的 update_summaries 只入队，
+    LLM 压缩在 ensemble-summary 线程完成，不阻塞回合收尾。
+    """
     repo = SqliteRepository(make_engine(settings.sqlite_path))
     init_db(repo.engine)
     module = load_module(module_path)
     pricing = load_pricing(settings.pricing_path)
     client = LLMClient(settings, pricing, usage_sink=repo)
     guard = BudgetGuard(settings)
-    memory = JournalMemory(repo)
-    graph = build_game_graph(repo, module, memory, client, guard,
+    memory = JournalMemory(repo, summarizer=LLMSummarizer(client))
+    queue = BackgroundQueue(lambda key, payload: memory.update_summaries(*payload),
+                            name="summary")
+    queue.start()
+    graph = build_game_graph(repo, module, BackgroundSummaries(memory, queue), client, guard,
                              build_checkpointer(settings.sqlite_path))
     return AppContext(settings=settings, repo=repo, module=module, client=client,
-                      guard=guard, memory=memory, graph=graph)
+                      guard=guard, memory=memory, queue=queue, graph=graph)
 
 
 def render_narration(segments: list[dict], module) -> list[str]:
@@ -5098,6 +5110,8 @@ def main(argv: list[str] | None = None) -> int:
 
     ctx = assemble(settings, args.module_path)
     run_play(ctx, args.campaign_id)
+    if ctx.queue is not None:
+        ctx.queue.flush(2.0)      # 退出前尽力收尾摘要（丢任务无害：watermark 下次提交自愈）
     return 0
 
 
