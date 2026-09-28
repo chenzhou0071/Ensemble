@@ -1,5 +1,5 @@
 from app.config import Pricing, PricingEntry, Settings
-from app.graph.nodes.gm import build_decide_node, build_validate_node
+from app.graph.nodes.gm import DECIDE_SYSTEM, build_decide_node, build_validate_node
 from app.llm.client import LLMClient, LlmContext
 
 CTX_KEYS = ("campaign_id", "branch_id", "turn_id")
@@ -31,6 +31,8 @@ def make_client(script):
 def base_state(campaign, **extra):
     return {"campaign_id": campaign.id, "branch_id": campaign.active_branch_id,
             "turn_id": 1, "scene_id": "gate", "npc_attitudes": {"guard": 40},
+            "characters": {"pc_1": {"id": "pc_1", "name": "调查员",
+                                    "skills": {"侦查": 50}, "attributes": {"力量": 60}}},
             "player_inputs": [{"player_id": "p1", "character_id": "pc_1", "text": "我想进城"}],
             "memory_context": "前情摘要：村庄不安宁", "budget_level": "ok", **extra}
 
@@ -40,6 +42,8 @@ def test_decide_builds_context_and_returns_raw(campaign, mini_module):
     assert upd["decision_raw"] == '{"intent_summary": "进城"}'
     prompt = built["qwen-plus"].calls[0][1].content
     assert "村口" in prompt and "我想进城" in prompt and "王守卫" in prompt and "前情摘要" in prompt
+    assert "pc_1" in prompt and "侦查" in prompt  # 角色 id 与技能表进上下文
+    assert "tavern" in prompt  # 可去场景出口
 
 def test_decide_switches_to_cheap_model_when_exceeded(campaign, mini_module):
     client, built, rows = make_client(['{"intent_summary": "x"}'])
@@ -59,6 +63,8 @@ def test_validate_repairs_once_then_succeeds(campaign):
     upd = build_validate_node(client)(state)
     assert upd["decision"]["intent_summary"] == "修复后的合法输出"
     assert len(built["qwen-plus"].calls) == 1
+    msgs = built["qwen-plus"].calls[0]
+    assert msgs[0].role == "system" and msgs[0].content == DECIDE_SYSTEM  # repair 随行字段要求
 
 def test_validate_gives_up_after_one_repair(campaign):
     client, built, _ = make_client(["还是不是 JSON"])
