@@ -42,8 +42,10 @@ def test_update_summaries_uses_summarizer_and_threshold(env):
     repo, campaign = env
     b = campaign.active_branch_id
     calls = []
-    def summarizer(messages):
+    seen = []
+    def summarizer(campaign_id, branch_id, turn_id, messages):
         calls.append(messages)
+        seen.append((campaign_id, branch_id, turn_id))
         return "压缩后的摘要"
     mem = JournalMemory(repo, summarizer=summarizer)
     for i in range(12):
@@ -51,6 +53,7 @@ def test_update_summaries_uses_summarizer_and_threshold(env):
     mem.update_summaries(campaign.id, b, turn_id=3)
     assert repo.latest_summary(campaign.id, b).content == "压缩后的摘要"
     assert len(calls) == 1
+    assert seen == [(campaign.id, b, 3)]
 
 def test_update_summaries_below_threshold_skips(env):
     repo, campaign = env
@@ -66,7 +69,7 @@ def test_update_summaries_passes_prior_summary_to_summarizer(env):
     b = campaign.active_branch_id
     repo.append_summary(campaign.id, b, 0, "旧摘要")
     captured = []
-    def summarizer(messages):
+    def summarizer(campaign_id, branch_id, turn_id, messages):
         captured.append(messages)
         return "新摘要"
     mem = JournalMemory(repo, summarizer=summarizer)

@@ -18,7 +18,7 @@ _SUMMARY_PROMPT = (
 
 
 class JournalMemory:
-    def __init__(self, repo, summarizer: Callable[[list[ChatMessage]], str] | None = None):
+    def __init__(self, repo, summarizer: Callable[[str, str, int, list[ChatMessage]], str] | None = None):
         self._repo = repo
         self._summarizer = summarizer
 
@@ -65,7 +65,7 @@ class JournalMemory:
         body = "\n".join(t for t in texts if t)
         if self._summarizer is not None:
             prior = f"已有摘要：{last.content}\n" if last else ""
-            content = self._summarizer([
+            content = self._summarizer(campaign_id, branch_id, turn_id, [
                 ChatMessage(role="system", content=_SUMMARY_PROMPT),
                 ChatMessage(role="user", content=f"{prior}新事件：\n{body}"),
             ])
