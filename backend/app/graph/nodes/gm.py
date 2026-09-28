@@ -1,6 +1,7 @@
 """GM 节点：结构化裁决（decide）与校验（validate，含 repair 重试）。"""
 from typing import Callable
 
+from app.graph.narrative import parse_segments
 from app.graph.schemas import parse_decision_json
 from app.graph.state import GameState
 from app.llm.client import ChatMessage, LLMClient, LlmContext
@@ -97,3 +98,96 @@ def build_validate_node(client: LLMClient) -> Callable[[GameState], dict]:
         return {"decision": decision.model_dump(mode="json"), "error": None}
 
     return validate_decision
+
+
+NARRATE_SYSTEM = (
+    "你是跑团主持人（COC 风格）。把本回合的结果编排成一段连贯的中文叙事。\n"
+    "要求：\n"
+    "1. NPC 的台词必须用标记包裹：[[npc:<npc_id>]]台词内容[[/npc]]，<npc_id> 只能用给定的 id；标记内只写原话，不要写「某某说：」前缀；\n"
+    "2. 标记之外的文字是你的旁白（环境、动作、结果）；NPC 的动作放进旁白描述；\n"
+    "3. 把检定结果转化为故事后果（成功与失败都要有后果）；不要把掷骰数值、id、规则术语写进叙事；\n"
+    "4. NPC 台词与动作以给定的「NPC 反应」为准：可润色使其连贯，不得改变原意，不得编造未提供的台词；\n"
+    "5. 用第二人称（你/你们）叙述，需要区分玩家时用角色名；单回合篇幅 300 字以内，开场可稍长；\n"
+    "6. 不要输出 JSON、markdown 标记、规则解释或任何元评论；可以补充环境细节，但不要新增重要角色、地点或剧情事实。"
+)
+
+
+def _char_name(state: GameState, character_id: str | None) -> str:
+    """叙事用角色名：查不到回退 id（避免内部 id 泄进叙事文本）。"""
+    if character_id:
+        c = state.get("characters", {}).get(character_id)
+        if c and c.get("name"):
+            return c["name"]
+    return character_id or "?"
+
+
+def _check_lines(state: GameState) -> str:
+    lines = []
+    for c in state.get("check_results", []):
+        verdict = "成功" if c.get("success") else "失败"
+        lines.append(f"- {_char_name(state, c.get('actor'))}的「{c['skill']}」："
+                     f"{c['roll']}/{c['skill_value']} → {c['level']}（{verdict}）")
+    return "\n".join(lines) or "（本回合无检定）"
+
+
+def _reaction_lines(state: GameState, module) -> str:
+    lines = []
+    for npc_id, r in (state.get("npc_reactions") or {}).items():
+        r = r or {}
+        speech, action = r.get("speech", ""), r.get("action")
+        if not speech and not action:
+            continue  # 沉默占位（NPC 失败降级，规格 §8）：不进入提示词
+        try:
+            name = module.npc(npc_id).name
+        except KeyError:
+            name = npc_id
+        part = f"- {npc_id}（{name}）"
+        if speech:
+            part += f" 台词：「{speech}」"
+        if action:
+            part += f" 动作：{action}"
+        lines.append(part)
+    return "\n".join(lines) or "（本回合无 NPC 回应）"
+
+
+def build_narrate_node(client: LLMClient, module) -> Callable[[GameState], dict]:
+    def gm_narrate(state: GameState) -> dict:
+        scene = module.scene(state["scene_id"])
+        inputs_txt = "\n".join(
+            f"- {_char_name(state, i.get('character_id') or i.get('player_id'))}：{i['text']}"
+            for i in state.get("player_inputs", [])
+        ) or "（开场回合，无玩家行动）"
+        opening_line = ""
+        if state.get("is_opening"):
+            opening_line = f"开场设定（请扩写为叙事）：\n{module.opening.narration}\n"
+        user = (
+            f"{opening_line}"
+            f"当前场景：{scene.name}\n{scene.description}\n"
+            f"玩家行动：\n{inputs_txt}\n"
+            f"检定结果：\n{_check_lines(state)}\n"
+            f"NPC 反应：\n{_reaction_lines(state, module)}\n"
+            "请输出本回合的完整叙事。"
+        )
+        messages = [ChatMessage(role="system", content=NARRATE_SYSTEM),
+                    ChatMessage(role="user", content=user)]
+        last_error = ""
+        for _ in range(2):  # 首次 + repair 重试 1 次（规格 §8）
+            try:
+                raw = client.chat("gm", messages, _ctx(state), cheap=_cheap(state))
+                segs = parse_segments(raw)
+                if segs:
+                    return {"narration": raw,
+                            "narration_segments": [{"speaker": s.speaker, "text": s.text}
+                                                   for s in segs],
+                            "error": None}
+                last_error = "empty narration"
+            except Exception as exc:
+                last_error = str(exc)
+            messages = messages + [ChatMessage(
+                role="user",
+                content=f"上次输出不合格（{last_error}）。请重新输出完整叙事，"
+                        "NPC 台词必须带 [[npc:id]] 标记。")]
+        return {"error": "narrate_failed", "degraded": {"narrate_failed": True},
+                "narration": "", "narration_segments": []}
+
+    return gm_narrate
