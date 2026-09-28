@@ -3148,6 +3148,377 @@ git add backend/app/graph/nodes/gm.py backend/tests/graph/test_gm_narrate.py
 git commit -m "feat(graph): gm_narrate with marker-based narrative orchestration"
 ```
 
+### Task 18b: 异步后台队列 + 摘要异步化（设计：`specs/2026-09-29-async-queue-design.md`）
+
+**背景**：`post_turn` 同步调用 `memory.update_summaries`；真接线 LLM 摘要后将阻塞回合收尾。本任务落地通用 `BackgroundQueue`（watermark 追赶语义：按 key 合并、最新票胜出、丢弃自愈），摘要为首个消费者并完成 LLM 真接线；M5 Graphiti 摄取复用同一机制，不改 M2 上层。
+
+**Files:**
+- Create: `backend/app/tasks.py`、`backend/app/memory/scheduler.py`、`backend/app/memory/summarizer.py`
+- Create: `backend/tests/test_tasks.py`、`backend/tests/memory/test_scheduler.py`、`backend/tests/memory/test_summarizer.py`、`backend/tests/storage/test_db_engine.py`
+- Modify: `backend/app/memory/journal.py`（summarizer 签名携带 ids）、`backend/tests/memory/test_journal.py`（2 处）、`backend/app/storage/db.py`（WAL + busy_timeout）
+
+**Interfaces:**
+- Consumes: `JournalMemory`（T13）、`LLMClient.chat(role, messages, ctx)` / `LlmContext` / `ChatMessage`（T10/T11）、`Settings.extractor_model`
+- Produces:
+  - `tasks.py`：`BackgroundQueue(handler: Callable[[str, Any], None], name: str = "bg")`；`submit(key, payload)`（覆盖式合并；`stop()` 后忽略）/ `start()`（daemon 线程 `ensemble-{name}`）/ `run_pending() -> int`（同步处理全部待办，测试模式）/ `flush(timeout=2.0) -> bool`（待办清空且当前任务处理完毕）/ `stop()`（跑完在队任务后退出）；处理器异常一律捕获记日志、worker 永不退出
+  - `scheduler.py`：`BackgroundSummaries(inner, queue)`——`update_summaries(c,b,t)` → `queue.submit(f"{c}@{b}", (c,b,t))`；`write_event/search/get_context` 透传
+  - `summarizer.py`：`LLMSummarizer(client)`；`__call__(campaign_id, branch_id, turn_id, messages) -> str`（`extractor` 角色 + `LlmContext` → usage 自动记账）
+  - `journal.py` 的 `summarizer` 类型：`Callable[[str, str, int, list[ChatMessage]], str] | None`
+- 说明：本任务不改任何装配（T21/T24 尚不存在）；届时按设计文档 §8：`BackgroundSummaries + LLMSummarizer + queue.start()`，退出 `flush(2.0)`。
+
+- [ ] **Step 1: 写失败测试**
+
+`backend/tests/test_tasks.py`：
+```python
+from app.tasks import BackgroundQueue
+
+
+def test_run_pending_coalesces_to_latest_payload():
+    calls = []
+    q = BackgroundQueue(lambda key, payload: calls.append((key, payload)))
+    q.submit("c@main", 1)
+    q.submit("c@main", 2)
+    assert q.run_pending() == 1
+    assert calls == [("c@main", 2)]
+
+
+def test_handler_failure_is_swallowed_and_queue_survives():
+    calls = []
+
+    def handler(key, payload):
+        calls.append(payload)
+        if payload == 1:
+            raise RuntimeError("boom")
+
+    q = BackgroundQueue(handler)
+    q.submit("k", 1)
+    assert q.run_pending() == 1
+    q.submit("k", 2)
+    q.run_pending()
+    assert calls == [1, 2]
+
+
+def test_flush_waits_for_worker_to_finish():
+    done = []
+    q = BackgroundQueue(lambda key, payload: done.append(payload))
+    q.start()
+    q.submit("k", 7)
+    assert q.flush(timeout=2.0) is True
+    assert done == [7]
+    q.stop()
+
+
+def test_stop_ignores_later_submits():
+    calls = []
+    q = BackgroundQueue(lambda key, payload: calls.append(payload))
+    q.start()
+    q.stop()
+    q.submit("k", 1)
+    q.run_pending()
+    assert calls == []
+```
+
+`backend/tests/memory/test_scheduler.py`：
+```python
+from app.memory.scheduler import BackgroundSummaries
+from app.tasks import BackgroundQueue
+
+
+class FakeMemory:
+    def __init__(self):
+        self.updates = []
+
+    def update_summaries(self, campaign_id, branch_id, turn_id):
+        self.updates.append((campaign_id, branch_id, turn_id))
+
+    def write_event(self, campaign_id, branch_id, event):
+        return ("write", campaign_id)
+
+    def search(self, campaign_id, branch_id, query, limit=5):
+        return [("search", query, limit)]
+
+    def get_context(self, campaign_id, branch_id, budget_chars=1200):
+        return f"ctx:{budget_chars}"
+
+
+def test_update_summaries_deferred_and_coalesced():
+    inner = FakeMemory()
+    q = BackgroundQueue(lambda key, payload: inner.update_summaries(*payload))
+    bg = BackgroundSummaries(inner, q)
+    bg.update_summaries("c", "c@main", 3)
+    bg.update_summaries("c", "c@main", 5)
+    assert inner.updates == []                     # 主线程零执行
+    q.run_pending()
+    assert inner.updates == [("c", "c@main", 5)]   # 合并为最大 watermark
+
+
+def test_other_methods_delegate_to_inner():
+    inner = FakeMemory()
+    bg = BackgroundSummaries(inner, BackgroundQueue(lambda k, p: None))
+    assert bg.get_context("c", "b") == "ctx:1200"
+    assert bg.search("c", "b", "磨坊") == [("search", "磨坊", 5)]
+    assert bg.write_event("c", "b", object()) == ("write", "c")
+```
+
+`backend/tests/memory/test_summarizer.py`：
+```python
+from app.config import Pricing, PricingEntry, Settings
+from app.llm.client import ChatMessage, LLMClient
+from app.llm.fakes import FakeLLM
+from app.memory.summarizer import LLMSummarizer
+
+
+class Sink:
+    def __init__(self):
+        self.rows = []
+
+    def record_usage(self, campaign_id, branch_id, turn_id, role, model, tokens_in,
+                     tokens_out, cost_usd, latency_ms):
+        self.rows.append((campaign_id, branch_id, turn_id, role, model))
+
+
+def test_uses_extractor_role_and_records_usage():
+    settings = Settings(extractor_model="qwen-turbo")
+    pricing = Pricing(models={"qwen-turbo": PricingEntry(input_per_1k=0.1, output_per_1k=0.2)})
+    built = {}
+
+    def factory(model, base_url, api_key):
+        if model not in built:
+            built[model] = FakeLLM(["压缩后的摘要"])
+        return built[model]
+
+    sink = Sink()
+    client = LLMClient(settings, pricing, usage_sink=sink, model_factory=factory)
+    result = LLMSummarizer(client)("c1", "c1@main", 7,
+                                   [ChatMessage(role="user", content="事件")])
+    assert result == "压缩后的摘要"
+    assert "qwen-turbo" in built                        # extractor 路由
+    assert built["qwen-turbo"].calls[0][0].content == "事件"
+    assert sink.rows == [("c1", "c1@main", 7, "extractor", "qwen-turbo")]
+```
+
+`backend/tests/storage/test_db_engine.py`：
+```python
+from app.storage.db import make_engine
+
+
+def test_engine_enables_wal_and_busy_timeout(tmp_path):
+    engine = make_engine(str(tmp_path / "t.db"))
+    with engine.connect() as conn:
+        assert conn.exec_driver_sql("PRAGMA journal_mode").scalar() == "wal"
+        assert conn.exec_driver_sql("PRAGMA busy_timeout").scalar() == 5000
+```
+
+`backend/tests/memory/test_journal.py` 两处改签名（并断言 ids 透传）：
+```python
+    seen = []
+    def summarizer(campaign_id, branch_id, turn_id, messages):
+        calls.append(messages)
+        seen.append((campaign_id, branch_id, turn_id))
+        return "压缩后的摘要"
+    # ...
+    assert seen == [(campaign.id, b, 3)]
+```
+第二处（prior 摘要测试）仅函数签名改为 `(campaign_id, branch_id, turn_id, messages)`。
+
+- [ ] **Step 2: 验证失败**
+
+Run: `cd backend; uv run pytest tests/test_tasks.py tests/memory/test_scheduler.py tests/memory/test_summarizer.py -q`
+Expected: FAIL —— `ModuleNotFoundError: No module named 'app.tasks'`
+
+- [ ] **Step 3: 实现 `app/tasks.py`**
+
+```python
+"""通用后台队列：watermark 追赶语义（按 key 合并，最新票胜出）。
+
+任务 = (key, watermark)，处理器语义为"把 key 追赶到 watermark"且必须可从持久层重算；
+因此合并、丢弃、重启丢失均无害，下次提交自动补齐（设计：specs/2026-09-29-async-queue-design.md）。
+"""
+import logging
+import threading
+from typing import Any, Callable
+
+logger = logging.getLogger(__name__)
+
+
+class BackgroundQueue:
+    """单 daemon 工作线程 + 覆盖式合并；不 start() 时用 run_pending() 同步执行（测试）。"""
+
+    def __init__(self, handler: Callable[[str, Any], None], name: str = "bg"):
+        self._handler = handler
+        self._name = name
+        self._pending: dict[str, Any] = {}
+        self._busy = False
+        self._stopping = False
+        self._lock = threading.Condition()
+        self._thread: threading.Thread | None = None
+
+    def submit(self, key: str, payload: Any) -> None:
+        with self._lock:
+            if self._stopping:
+                return
+            self._pending[key] = payload
+            self._lock.notify()
+
+    def start(self) -> None:
+        if self._thread is not None:
+            return
+        self._thread = threading.Thread(target=self._loop,
+                                        name=f"ensemble-{self._name}", daemon=True)
+        self._thread.start()
+
+    def run_pending(self) -> int:
+        processed = 0
+        while True:
+            job = self._pop()
+            if job is None:
+                return processed
+            self._handle(*job)
+            processed += 1
+
+    def flush(self, timeout: float = 2.0) -> bool:
+        with self._lock:
+            return self._lock.wait_for(lambda: not self._pending and not self._busy,
+                                       timeout=timeout)
+
+    def stop(self) -> None:
+        with self._lock:
+            self._stopping = True
+            self._lock.notify_all()
+        if self._thread is not None:
+            self._thread.join(timeout=1.0)
+            self._thread = None
+
+    # ---------- 内部 ----------
+
+    def _loop(self) -> None:
+        while True:
+            with self._lock:
+                self._lock.wait_for(lambda: self._pending or self._stopping)
+                if not self._pending:
+                    return  # 停止且已排空
+                key, payload = self._pop_locked()
+            self._handle(key, payload)
+
+    def _pop(self) -> tuple[str, Any] | None:
+        with self._lock:
+            if not self._pending:
+                return None
+            return self._pop_locked()
+
+    def _pop_locked(self) -> tuple[str, Any]:
+        key = next(iter(self._pending))
+        return key, self._pending.pop(key)
+
+    def _handle(self, key: str, payload: Any) -> None:
+        with self._lock:
+            self._busy = True
+        try:
+            self._handler(key, payload)
+        except Exception:
+            logger.exception("后台任务失败（key=%s，已丢弃，等待下次提交自愈）", key)
+        finally:
+            with self._lock:
+                self._busy = False
+                self._lock.notify_all()
+```
+
+- [ ] **Step 4: 验证通过（队列单测）**
+
+Run: `cd backend; uv run pytest tests/test_tasks.py -q`
+Expected: PASS（4 passed）
+
+- [ ] **Step 5: 实现 scheduler / summarizer / journal 签名 / db pragma**
+
+`backend/app/memory/scheduler.py`：
+```python
+"""摘要异步化适配器：update_summaries 变为 watermark 追赶任务；其余方法透传。"""
+from typing import TYPE_CHECKING
+
+from app.memory.base import MemoryEvent
+from app.tasks import BackgroundQueue
+
+if TYPE_CHECKING:
+    from app.memory.journal import JournalMemory
+
+
+class BackgroundSummaries:
+    def __init__(self, inner: "JournalMemory", queue: BackgroundQueue):
+        self._inner = inner
+        self._queue = queue
+
+    def update_summaries(self, campaign_id: str, branch_id: str, turn_id: int) -> None:
+        self._queue.submit(f"{campaign_id}@{branch_id}", (campaign_id, branch_id, turn_id))
+
+    def write_event(self, campaign_id: str, branch_id: str, event: MemoryEvent) -> None:
+        return self._inner.write_event(campaign_id, branch_id, event)
+
+    def search(self, campaign_id: str, branch_id: str, query: str, limit: int = 5):
+        return self._inner.search(campaign_id, branch_id, query, limit=limit)
+
+    def get_context(self, campaign_id: str, branch_id: str, budget_chars: int = 1200) -> str:
+        return self._inner.get_context(campaign_id, branch_id, budget_chars=budget_chars)
+```
+
+`backend/app/memory/summarizer.py`：
+```python
+"""LLM 摘要器：把 JournalMemory 的 summarizer 钩子接到 LLMClient（extractor 角色 + 记账）。"""
+from app.llm.client import ChatMessage, LLMClient, LlmContext
+
+
+class LLMSummarizer:
+    def __init__(self, client: LLMClient):
+        self._client = client
+
+    def __call__(self, campaign_id: str, branch_id: str, turn_id: int,
+                 messages: list[ChatMessage]) -> str:
+        return self._client.chat(
+            "extractor", messages,
+            LlmContext(campaign_id=campaign_id, branch_id=branch_id, turn_id=turn_id))
+```
+
+`backend/app/memory/journal.py`（签名与调用处）：
+```python
+    def __init__(self, repo, summarizer: Callable[[str, str, int, list[ChatMessage]], str] | None = None):
+        ...
+    # update_summaries 内：
+            content = self._summarizer(campaign_id, branch_id, turn_id, [
+                ChatMessage(role="system", content=_SUMMARY_PROMPT),
+                ChatMessage(role="user", content=f"{prior}新事件：\n{body}"),
+            ])
+```
+
+`backend/app/storage/db.py`（WAL + busy_timeout）：
+```python
+from sqlalchemy import create_engine, event
+
+
+def make_engine(sqlite_path: str) -> Engine:
+    engine = create_engine(f"sqlite:///{sqlite_path}",
+                           connect_args={"check_same_thread": False})
+
+    @event.listens_for(engine, "connect")
+    def _sqlite_pragmas(dbapi_connection, _record):
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA busy_timeout=5000")
+        cursor.close()
+
+    return engine
+```
+
+- [ ] **Step 6: 验证通过（全量）**
+
+Run: `cd backend; uv run pytest -q`
+Expected: PASS（93 = 85 既有 + 8 新增；journal 2 处签名适配后语义不变）
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add backend/app/tasks.py backend/app/memory/scheduler.py backend/app/memory/summarizer.py backend/app/memory/journal.py backend/app/storage/db.py backend/tests/test_tasks.py backend/tests/memory/test_scheduler.py backend/tests/memory/test_summarizer.py backend/tests/memory/test_journal.py backend/tests/storage/test_db_engine.py
+git commit -m "feat(memory): Task 18b async summary queue with LLM summarizer wiring"
+```
+
 ---
 
 ### Task 19: NPC 子图 —— 人设组装、独立说话节点、Send 扇出分发
