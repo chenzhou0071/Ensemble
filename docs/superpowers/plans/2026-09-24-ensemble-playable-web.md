@@ -134,11 +134,13 @@ CTX = LlmContext(campaign_id="c1", branch_id="c1@main", turn_id=1)
 
 def make_pricing():
     return Pricing(models={
-        "qwen-plus": PricingEntry(input_per_1k=0.0008, output_per_1k=0.002),
-        "qwen-turbo": PricingEntry(input_per_1k=0.0003, output_per_1k=0.0006),
+        "qwen3.8-flash": PricingEntry(input_per_1k=0.0008, output_per_1k=0.002),
+        "alt-cheap-model": PricingEntry(input_per_1k=0.0003, output_per_1k=0.0006),
     })
 
 def make_client(script):
+    # gm 用真名；cheap 用虚构名以区分"超限切换"路由（生产两档同名，见 config.py）
+    settings = Settings(gm_model="qwen3.8-flash", cheap_model="alt-cheap-model")
     rows, built = [], {}
     def factory(model, base_url, api_key):
         built[model] = FakeLLM(list(script))
@@ -146,21 +148,21 @@ def make_client(script):
     class Sink:
         def record_usage(self, *a, **kw):
             rows.append(kw)
-    return LLMClient(Settings(), make_pricing(), usage_sink=Sink(), model_factory=factory), built, rows
+    return LLMClient(settings, make_pricing(), usage_sink=Sink(), model_factory=factory), built, rows
 
 def test_stream_joins_to_full_text_and_records_once():
     client, built, rows = make_client(["你好，世界！"])
     text = "".join(client.chat_stream("gm", MSGS, CTX))
     assert text == "你好，世界！"
     assert len(rows) == 1
-    assert rows[0]["model"] == "qwen-plus"
+    assert rows[0]["model"] == "qwen3.8-flash"
     assert rows[0]["tokens_in"] == 10 and rows[0]["tokens_out"] == 20
 
 def test_stream_cheap_routing():
     client, built, rows = make_client(["x"])
     text = "".join(client.chat_stream("gm", MSGS, CTX, cheap=True))
-    assert text == "x" and "qwen-turbo" in built
-    assert rows[0]["model"] == "qwen-turbo"
+    assert text == "x" and "alt-cheap-model" in built
+    assert rows[0]["model"] == "alt-cheap-model"
 
 def test_stream_usage_estimate_when_provider_silent():
     class SilentModel:
@@ -511,7 +513,7 @@ def test_ending_instruction_in_prompt(campaign, mini_module):
                                            "clues_revealed": [], "proactive_npc_triggers": [],
                                            "scene_transition": None, "memory_queries": []})
     build_narrate_node(client, mini_module)(state)
-    prompt = built["qwen-plus"].calls[0][1].content
+    prompt = built["qwen3.8-flash"].calls[0][1].content
     assert "揭开真相" in prompt                    # mini_module 结局 e1 的 condition
 ```
 
@@ -704,11 +706,12 @@ def make_client(script):
     class Sink:
         def record_usage(self, *a, **kw):
             rows.append(kw)
+    settings = Settings(gm_model="qwen3.8-flash", cheap_model="alt-cheap-model")
     pricing = Pricing(models={
-        "qwen-plus": PricingEntry(input_per_1k=0.0008, output_per_1k=0.002),
-        "qwen-turbo": PricingEntry(input_per_1k=0.0003, output_per_1k=0.0006),
+        "qwen3.8-flash": PricingEntry(input_per_1k=0.0008, output_per_1k=0.002),
+        "alt-cheap-model": PricingEntry(input_per_1k=0.0003, output_per_1k=0.0006),
     })
-    return LLMClient(Settings(), pricing, usage_sink=Sink(), model_factory=factory), built
+    return LLMClient(settings, pricing, usage_sink=Sink(), model_factory=factory), built
 
 
 def test_validate_repairs_unknown_clue(campaign):
@@ -720,7 +723,7 @@ def test_validate_repairs_unknown_clue(campaign):
         {"decision_raw": bad, "budget_level": "ok", "campaign_id": "c",
          "branch_id": "c@main", "turn_id": 1})
     assert upd["error"] is None and upd["decision"]["clues_revealed"] == ["c1"]
-    assert "ghost_clue" in built["qwen-plus"].calls[0][1].content   # repair 反馈包含非法引用
+    assert "ghost_clue" in built["qwen3.8-flash"].calls[0][1].content   # repair 反馈包含非法引用
 
 
 def test_validate_gives_up_on_unknown_ending(campaign):
@@ -731,7 +734,7 @@ def test_validate_gives_up_on_unknown_ending(campaign):
         {"decision_raw": bad, "budget_level": "ok", "campaign_id": "c",
          "branch_id": "c@main", "turn_id": 1})
     assert upd["error"] == "decision_invalid"
-    assert built["qwen-plus"].calls[0][1].role == "user"
+    assert built["qwen3.8-flash"].calls[0][1].role == "user"
 
 
 def test_post_turn_writes_clue_event_and_ending(repo, campaign):
@@ -767,7 +770,7 @@ def test_graph_ends_on_ending(repo, campaign, mini_module):
     decide_ending = ('{"intent_summary": "终结", "checks": [], "proactive_npc_triggers": [],'
                      ' "scene_transition": null, "memory_queries": [],'
                      ' "clues_revealed": [], "ending_reached": "e1"}')
-    script = {"qwen-plus": [
+    script = {"qwen3.8-flash": [
         '{"intent_summary": "开场", "checks": [], "proactive_npc_triggers": [],'
         ' "scene_transition": null, "memory_queries": []}',
         "开场叙事。", decide_ending, "尘埃落定，故事就此收束。"]}
@@ -776,9 +779,8 @@ def test_graph_ends_on_ending(repo, campaign, mini_module):
         items = queues.get(model, [])
         return FakeLLM([items.pop(0)] if items else [])
     pricing = Pricing(models={
-        "qwen-plus": PricingEntry(input_per_1k=0.0008, output_per_1k=0.002),
-        "qwen-turbo": PricingEntry(input_per_1k=0.0003, output_per_1k=0.0006),
-        "deepseek-chat": PricingEntry(input_per_1k=0.00027, output_per_1k=0.0011)})
+        "qwen3.8-flash": PricingEntry(input_per_1k=0.0008, output_per_1k=0.002),
+        "deepseek-flash": PricingEntry(input_per_1k=0.00027, output_per_1k=0.0011)})
     client = LLMClient(Settings(), pricing, usage_sink=repo, model_factory=factory)
     from app.llm.usage import BudgetGuard
     from app.memory.journal import JournalMemory
@@ -1482,9 +1484,8 @@ def _env(tmp_path, script):
         items = queues.get(model, [])
         return FakeLLM([items.pop(0)] if items else [])
     pricing = Pricing(models={
-        "qwen-plus": PricingEntry(input_per_1k=0.0008, output_per_1k=0.002),
-        "qwen-turbo": PricingEntry(input_per_1k=0.0003, output_per_1k=0.0006),
-        "deepseek-chat": PricingEntry(input_per_1k=0.00027, output_per_1k=0.0011)})
+        "qwen3.8-flash": PricingEntry(input_per_1k=0.0008, output_per_1k=0.002),
+        "deepseek-flash": PricingEntry(input_per_1k=0.00027, output_per_1k=0.0011)})
     settings = Settings(sqlite_path=db)
     client = LLMClient(settings, pricing, usage_sink=repo, model_factory=factory)
     graph = build_game_graph(repo, _mini(), JournalMemory(repo), client,
@@ -1501,7 +1502,7 @@ def _mini():
         "endings": [{"id": "e1", "scene": "gate", "condition": "真相大白"}]})
 
 def test_fork_copies_chain_and_strands_at_boundary(tmp_path):
-    db, repo, campaign, graph, settings = _env(tmp_path, {"qwen-plus": [
+    db, repo, campaign, graph, settings = _env(tmp_path, {"qwen3.8-flash": [
         OPENING, "开场叙事。", PLAIN, "第二回合叙事。"]})
     cfg = {"configurable": {"thread_id": campaign.active_branch_id}}
     graph.invoke({"campaign_id": campaign.id, "branch_id": campaign.active_branch_id,
@@ -1529,7 +1530,7 @@ def test_fork_copies_chain_and_strands_at_boundary(tmp_path):
 
 def test_fork_missing_boundary_raises(tmp_path):
     import pytest
-    db, repo, campaign, graph, settings = _env(tmp_path, {"qwen-plus": [OPENING, "开场。" ]})
+    db, repo, campaign, graph, settings = _env(tmp_path, {"qwen3.8-flash": [OPENING, "开场。" ]})
     cfg = {"configurable": {"thread_id": campaign.active_branch_id}}
     graph.invoke({"campaign_id": campaign.id, "branch_id": campaign.active_branch_id,
                   "turn_id": 0, "player_inputs": []}, cfg)
@@ -2155,7 +2156,7 @@ TURN_DECIDE = ('{"intent_summary": "调查", "checks": [], "proactive_npc_trigge
 
 def script_factory(items):
     """按模型名消耗脚本；每次 chat 新建 FakeLLM（与 LLMClient 的工厂调用方式一致）。"""
-    queues = {"qwen-plus": list(items)}
+    queues = {"qwen3.8-flash": list(items)}
 
     def factory(model, base_url, api_key):
         q = queues.get(model)
@@ -2642,7 +2643,7 @@ TURN_DECIDE = ('{"intent_summary": "调查", "checks": [], "proactive_npc_trigge
 
 
 def script_factory(items):
-    queues = {"qwen-plus": list(items)}
+    queues = {"qwen3.8-flash": list(items)}
 
     def factory(model, base_url, api_key):
         q = queues.get(model)
@@ -4675,7 +4676,7 @@ ROOT = Path(__file__).resolve().parents[3]
 
 def script_factory(items):
     """按模型名消耗脚本；每次 chat/chat_stream 新建 FakeLLM。"""
-    queues = {"qwen-plus": list(items)}
+    queues = {"qwen3.8-flash": list(items)}
 
     def factory(model, base_url, api_key):
         q = queues.get(model)
@@ -4687,7 +4688,7 @@ def script_factory(items):
 
 
 def make_script(char_id: str) -> list[str]:
-    """六条 qwen-plus 脚本：回合0 decide/narrate → 回合1 decide（检定+线索）/narrate
+    """六条 qwen3.8-flash 脚本：回合0 decide/narrate → 回合1 decide（检定+线索）/narrate
     → 回合2 decide（结局）/narrate。检定 actor 用动态角色 id。"""
     open_decide = json.dumps({"intent_summary": "开场", "checks": [],
                               "proactive_npc_triggers": [], "scene_transition": None,
@@ -4872,8 +4873,8 @@ SQLite 断点续玩与时间线分叉、Web 实时游玩。
 - Python 3.12+ 与 [uv](https://docs.astral.sh/uv/)
 - Node.js 20+
 - API keys：
-  - `DASHSCOPE_API_KEY`（阿里云百炼，用于 GM：qwen-plus / qwen-turbo）
-  - `DEEPSEEK_API_KEY`（用于 NPC：deepseek-chat）
+  - `DASHSCOPE_API_KEY`（阿里云百炼，用于 GM：qwen3.8-flash）
+  - `DEEPSEEK_API_KEY`（用于 NPC：deepseek-flash）
 
 ## 启动后端（端口 8000）
 

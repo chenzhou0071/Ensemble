@@ -395,7 +395,7 @@ TURN_DECIDE = ('{"intent_summary": "行动", "checks": [], "proactive_npc_trigge
 
 
 def script_factory(items):
-    queues = {"qwen-plus": list(items)}
+    queues = {"qwen3.8-flash": list(items)}
 
     def factory(model, base_url, api_key):
         q = queues.get(model)
@@ -1088,7 +1088,7 @@ def decide(char_id: str, skill: str, secret: bool) -> str:
 
 
 def script_factory(items):
-    queues = {"qwen-plus": list(items)}
+    queues = {"qwen3.8-flash": list(items)}
 
     def factory(model, base_url, api_key):
         q = queues.get(model)
@@ -1656,7 +1656,7 @@ ROOT = Path(__file__).resolve().parents[3]
 
 def script_factory(items):
     """按模型名消耗脚本；每次 chat/chat_stream 新建 FakeLLM。"""
-    queues = {"qwen-plus": list(items)}
+    queues = {"qwen3.8-flash": list(items)}
 
     def factory(model, base_url, api_key):
         q = queues.get(model)
@@ -1668,7 +1668,7 @@ def script_factory(items):
 
 
 def make_script(char_id: str) -> list[str]:
-    """八条 qwen-plus 脚本：开场 + 三轮（回合 2 为掉线跳过轮；回合 3 触发结局）。"""
+    """八条 qwen3.8-flash 脚本：开场 + 三轮（回合 2 为掉线跳过轮；回合 3 触发结局）。"""
 
     def decide(**extra):
         base = {"intent_summary": "行动", "checks": [], "proactive_npc_triggers": [],

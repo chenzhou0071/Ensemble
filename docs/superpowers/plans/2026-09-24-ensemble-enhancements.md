@@ -487,8 +487,8 @@ from app.obs.tracer import Tracer, make_tracer
 
 def make_pricing() -> Pricing:
     return Pricing(models={
-        "qwen-plus": PricingEntry(input_per_1k=0.001, output_per_1k=0.002),
-        "qwen-turbo": PricingEntry(input_per_1k=0.0005, output_per_1k=0.001),
+        "qwen3.8-flash": PricingEntry(input_per_1k=0.001, output_per_1k=0.002),
+        "deepseek-flash": PricingEntry(input_per_1k=0.0005, output_per_1k=0.001),
     })
 
 
@@ -552,7 +552,7 @@ def test_llm_client_traces_chat_with_turn_parent(tmp_path):
     rows = [r for r in load_rows(tmp_path) if r["run_type"] == "llm"]
     assert len(rows) == 1
     assert rows[0]["parent_run_id"] == turn
-    assert rows[0]["inputs"]["model"] == "qwen-plus"
+    assert rows[0]["inputs"]["model"] == "qwen3.8-flash"
     assert rows[0]["outputs"]["text"] == "你好"
 
 
@@ -998,8 +998,8 @@ from app.obs.counters import Counters, get_counters, reset_counters
 
 def make_pricing() -> Pricing:
     return Pricing(models={
-        "qwen-plus": PricingEntry(input_per_1k=0.001, output_per_1k=0.002),
-        "qwen-turbo": PricingEntry(input_per_1k=0.0005, output_per_1k=0.001),
+        "qwen3.8-flash": PricingEntry(input_per_1k=0.001, output_per_1k=0.002),
+        "deepseek-flash": PricingEntry(input_per_1k=0.0005, output_per_1k=0.001),
     })
 
 
@@ -1118,8 +1118,8 @@ def make_client(script: list[str]):
         return built[model]
 
     pricing = Pricing(models={
-        "qwen-plus": PricingEntry(input_per_1k=0.001, output_per_1k=0.002),
-        "qwen-turbo": PricingEntry(input_per_1k=0.0005, output_per_1k=0.001),
+        "qwen3.8-flash": PricingEntry(input_per_1k=0.001, output_per_1k=0.002),
+        "deepseek-flash": PricingEntry(input_per_1k=0.0005, output_per_1k=0.001),
     })
     return LLMClient(Settings(), pricing, model_factory=factory)
 
@@ -1186,7 +1186,7 @@ def test_narrate_failed_counts(campaign, mini_module):
 
 def test_budget_paused_counts(repo, campaign, mini_module):
     reset_counters()
-    repo.record_usage(campaign.id, campaign.active_branch_id, 0, "gm", "qwen-plus",
+    repo.record_usage(campaign.id, campaign.active_branch_id, 0, "gm", "qwen3.8-flash",
                       1, 1, 5.0, 100)
     guard = BudgetGuard(Settings(campaign_cost_cap_usd=1.0))
     upd = build_intake_node(repo, mini_module, guard)({
@@ -1226,7 +1226,7 @@ def client(tmp_path):
 def test_metrics_snapshot_and_usage(client):
     reset_counters()
     c, repo = client
-    repo.record_usage("c1", "c1@main", 1, "gm", "qwen-plus", 100, 50, 0.0004, 120)
+    repo.record_usage("c1", "c1@main", 1, "gm", "qwen3.8-flash", 100, 50, 0.0004, 120)
     get_counters().record_llm(ok=True)
     get_counters().record_turn(1500, npc_count=2)
     body = c.get("/metrics").json()
@@ -1975,15 +1975,15 @@ def test_usage_endpoint_aggregates_and_lists_recent(client):
     cid = c.post("/api/campaigns", json={"module_id": "misty_hollow",
                                          "title": "记账"}).json()["campaign_id"]
     branch = repo.get_campaign(cid).active_branch_id
-    repo.record_usage(cid, branch, 1, "gm", "qwen-plus", 100, 50, 0.0004, 120)
-    repo.record_usage(cid, branch, 2, "npc", "qwen-turbo", 80, 40, 0.0001, 90)
+    repo.record_usage(cid, branch, 1, "gm", "qwen3.8-flash", 100, 50, 0.0004, 120)
+    repo.record_usage(cid, branch, 2, "npc", "deepseek-flash", 80, 40, 0.0001, 90)
     d = c.get(f"/api/campaigns/{cid}/usage").json()
     assert d["totals"]["calls"] == 2
     assert d["totals"]["tokens_in"] == 180 and d["totals"]["tokens_out"] == 90
     assert abs(d["totals"]["cost_usd"] - 0.0005) < 1e-9
     assert d["cap_usd"] > 0
     assert [r["role"] for r in d["recent"]] == ["npc", "gm"]        # 最近在前
-    assert d["recent"][0]["turn_id"] == 2 and d["recent"][0]["model"] == "qwen-turbo"
+    assert d["recent"][0]["turn_id"] == 2 and d["recent"][0]["model"] == "deepseek-flash"
 
 
 def test_usage_endpoint_404_for_unknown_campaign(client):
@@ -2044,7 +2044,7 @@ vi.mock("../../api/rest", () => ({
     usage: vi.fn().mockResolvedValue({
       totals: { calls: 2, tokens_in: 180, tokens_out: 90, cost_usd: 0.0005 },
       cap_usd: 1.0,
-      recent: [{ turn_id: 1, role: "gm", model: "qwen-plus",
+      recent: [{ turn_id: 1, role: "gm", model: "qwen3.8-flash",
                  tokens_in: 100, tokens_out: 50, cost_usd: 0.0004,
                  created_at: "2026-01-01T00:00:00" }],
     }),
@@ -2055,7 +2055,7 @@ describe("CostPanel", () => {
   it("renders totals against the cap and recent rows", async () => {
     render(<CostPanel campaignId="c1" />);
     expect(await screen.findByText(/\$0\.0005 \/ \$1\.00/)).toBeInTheDocument();
-    expect(await screen.findByText(/gm · qwen-plus/)).toBeInTheDocument();
+    expect(await screen.findByText(/gm · qwen3.8-flash/)).toBeInTheDocument();
   });
 });
 ```
@@ -2444,8 +2444,8 @@ MODULE_WITH_COMBAT = {
 def make_client(script):
     settings = Settings()
     pricing = Pricing(models={
-        "qwen-plus": PricingEntry(input_per_1k=0.0008, output_per_1k=0.002),
-        "qwen-turbo": PricingEntry(input_per_1k=0.0003, output_per_1k=0.0006),
+        "qwen3.8-flash": PricingEntry(input_per_1k=0.0008, output_per_1k=0.002),
+        "deepseek-flash": PricingEntry(input_per_1k=0.0003, output_per_1k=0.0006),
     })
     built: dict = {}
 
@@ -2591,7 +2591,7 @@ def test_narrate_includes_combat_line(campaign):
          "hp_before": 4, "hp_after": 0,
          "attack": {"roll": 10, "skill_value": 70, "level": "extreme", "success": True},
          "defense": {"roll": 90, "skill_value": 40, "level": "fail", "success": False}}]))
-    prompt = built["qwen-plus"].calls[0][1].content
+    prompt = built["qwen3.8-flash"].calls[0][1].content
     assert "战斗结算" in prompt and "流氓" in prompt and "8→4" in prompt
     assert "倒下" in prompt                       # HP 归零：败亡提示
 
@@ -2600,7 +2600,7 @@ def test_narrate_prompt_unchanged_without_combat(campaign):
     module = Module.model_validate(MODULE_WITH_COMBAT)
     client, built = make_client(["叙事。"])
     build_narrate_node(client, module)(base_state(campaign))
-    prompt = built["qwen-plus"].calls[0][1].content
+    prompt = built["qwen3.8-flash"].calls[0][1].content
     assert "战斗结算" not in prompt and "NPC 反应" in prompt
 
 
@@ -2614,7 +2614,7 @@ def test_graph_routes_combat_and_persists_hp(repo, campaign, monkeypatch):
                      ' "difficulty": "regular", "target": "thug"}],'
                      ' "proactive_npc_triggers": [], "scene_transition": null,'
                      ' "memory_queries": []}')
-    script = {"qwen-plus": [opening_decide, "开场叙事。", attack_decide, "你一拳把流氓打退半步。"]}
+    script = {"qwen3.8-flash": [opening_decide, "开场叙事。", attack_decide, "你一拳把流氓打退半步。"]}
     queues = {m: list(v) for m, v in script.items()}
 
     def factory(model, base_url, api_key):
@@ -2622,9 +2622,8 @@ def test_graph_routes_combat_and_persists_hp(repo, campaign, monkeypatch):
         return FakeLLM([items.pop(0)] if items else [])
 
     pricing = Pricing(models={
-        "qwen-plus": PricingEntry(input_per_1k=0.0008, output_per_1k=0.002),
-        "qwen-turbo": PricingEntry(input_per_1k=0.0003, output_per_1k=0.0006),
-        "deepseek-chat": PricingEntry(input_per_1k=0.00027, output_per_1k=0.0011)})
+        "qwen3.8-flash": PricingEntry(input_per_1k=0.0008, output_per_1k=0.002),
+        "deepseek-flash": PricingEntry(input_per_1k=0.00027, output_per_1k=0.0011)})
     client = LLMClient(Settings(), pricing, usage_sink=repo, model_factory=factory)
     graph = build_game_graph(repo, module, JournalMemory(repo), client,
                              BudgetGuard(Settings()), MemorySaver())
