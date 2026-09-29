@@ -4605,10 +4605,17 @@ git commit -m "feat(graph): main graph assembly with checkpointing and full-turn
 
 `backend/tests/graph/test_degradation_paths.py`：
 ```python
+"""降级路径图级集成测试：预算熔断阶梯 ①②③ 与规格 §8 降级矩阵端到端覆盖。
+
+④（战役熔断）由 test_main_graph 的 test_paused_halts_without_llm 覆盖；
+validate repair 失败由 test_validate_failure_falls_back_to_wait 覆盖；
+NPC 沉默单元级由 test_npc 覆盖，此处补图级。
+"""
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import Command
 
 from app.config import Pricing, PricingEntry, Settings
+from app.content.schema import Module
 from app.graph.main import build_game_graph
 from app.llm.client import LLMClient, make_repo_budget_probe
 from app.llm.usage import BudgetGuard
@@ -4673,14 +4680,32 @@ def init_state(campaign):
     return {"campaign_id": campaign.id, "branch_id": campaign.active_branch_id,
             "turn_id": 0, "player_inputs": []}
 
-def test_tight_downgrades_memory_and_shrinks_npc(repo, campaign, mini_module):
+TWIN_MODULE_DICT = {
+    "meta": {"id": "twin", "title": "双人模组"},
+    "opening": {"narration": "开场叙述", "scene_id": "gate"},
+    "scenes": [
+        {"id": "gate", "name": "村口", "npcs": ["guard", "barkeep"], "exits": ["tavern"]},
+        {"id": "tavern", "name": "酒馆", "npcs": [], "exits": []},
+    ],
+    "npcs": [
+        {"id": "guard", "name": "王守卫", "persona": "多疑的老兵", "initial_attitude": 40},
+        {"id": "barkeep", "name": "刘老板", "persona": "健谈的酒馆老板", "initial_attitude": 60},
+    ],
+    "clues": [],
+    "endings": [{"id": "e1", "scene": "tavern", "condition": "揭开真相"}],
+}
+
+
+def test_tight_downgrades_memory_and_shrinks_npc(repo, campaign):
+    """TIGHT：阶梯①记忆降档（600）+ 阶梯②两个在场 trigger 收缩到首位；未到 ③ 不换档。"""
+    twin = Module.model_validate(TWIN_MODULE_DICT)  # 同场景双 NPC，才能验证"收缩到首位"
     repo.record_usage(campaign.id, campaign.active_branch_id, 0, "gm", "qwen3.8-flash",
                       10, 20, 0.8, 100)  # cap=1.0 → 0.8 ∈ [0.7, 1.0) → TIGHT
     tight_decide = ('{"intent_summary": "接近", "checks": [], "proactive_npc_triggers":'
                     ' [{"npc_id": "guard", "trigger": "玩家靠近"}, {"npc_id": "barkeep"}],'
                     ' "scene_transition": null, "memory_queries": ["磨坊"]}')
     spy = SpyMemory(JournalMemory(repo))
-    graph, calls = make_env(repo, mini_module, {
+    graph, calls = make_env(repo, twin, {
         "qwen3.8-flash": [OPENING_DECIDE, OPENING_NARR, tight_decide, "守卫的目光钉在你身上。"],
         "deepseek-flash": ['{"speech": "站住。", "action": "伸手拦路"}'],
     }, memory=spy, campaign_cost_cap_usd=1.0, cheap_model="alt-cheap-model")
@@ -4710,7 +4735,7 @@ def test_exceeded_switches_gm_to_cheap_model(repo, campaign, mini_module):
     assert snap.next == ("wait_input",) and snap.values["turn_id"] == 2
     assert "qwen3.8-flash" not in calls           # 阶梯③：GM（decide+narrate）全换便宜档
     assert calls.count("alt-cheap-model") == 2    # cheap 用虚构名以验证切换（生产两档同名）
-    assert spy.context_budgets == [600]           # 阶梯①同样生效（逐级累积）
+    assert spy.context_budgets == [1200, 600]     # 阶梯①逐级累积：开场 OK 档仍 1200，EXCEEDED 回合 600
 
 def test_resolve_failure_falls_back(repo, campaign, mini_module, monkeypatch):
     def boom(*args, **kwargs):
@@ -4728,7 +4753,7 @@ def test_resolve_failure_falls_back(repo, campaign, mini_module, monkeypatch):
     snap = graph.get_state(cfg)
     assert snap.next == ("wait_input",)
     assert snap.values["error"] == "resolve_failed"   # 纯代码节点兜底（_guarded）
-    assert snap.values["degraded"]["resolve_failed"] is True
+    assert snap.values["degraded"] == {}              # 失败不推进：本轮 pending（含标记）丢弃
     assert snap.values["turn_id"] == 1                # 失败不推进
 
 class BrokenGetContextMemory:
