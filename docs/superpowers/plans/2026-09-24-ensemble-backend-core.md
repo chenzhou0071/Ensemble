@@ -1245,6 +1245,10 @@ Expected: FAIL —— `AttributeError: 'SqliteRepository' object has no attribut
             s.commit()
 
     def get_state_at(self, campaign_id: str, branch_id: str, turn_id: int) -> dict | None:
+        """「截至 turn_id」的最新快照（时间旅行读）：查询 turn_id <= ?。
+
+        回合内、本轮快照写入前调用时，返回回合初始状态（post_turn 的场景对比依赖此语义）。
+        """
         q = (select(StateSnapshotRow).where(StateSnapshotRow.branch_id == branch_id,
                                             StateSnapshotRow.turn_id <= turn_id)
              .order_by(StateSnapshotRow.turn_id.desc(), StateSnapshotRow.id.desc()))
@@ -2597,7 +2601,7 @@ git commit -m "feat(graph): intake and wait_input nodes with interrupt/resume"
 - Produces（追加到 `turn.py`）：
   - `build_resolve_checks_node(repo) -> Callable`：对 `state["decision"]["checks"]` 逐条掷骰，写 DiceRecord（含 seed）+ `check` 事件；返回 `{"check_results": [{actor, skill, roll, skill_value, level, success, seed, difficulty}]}`
   - `_skill_value(state, character_id, skill) -> int`：从 `state["characters"]` 查技能值（技能表 → 属性表 → 0）
-  - `build_post_turn_node(repo, memory) -> Callable`：写 `narration` 事件（含 segments）、`append_state` 快照（scene_id + npc_attitudes）、`memory.update_summaries`；返回 `{"turn_id": turn_id + 1, "decision": None}`
+  - `build_post_turn_node(repo, memory) -> Callable`：写 `narration` 事件（含 segments）；场景发生变化时写 `scene_changed` 事件（与上一回合快照对比，`payload={from_scene, to_scene, reason}`，规格 §4.3）；`append_state` 快照（scene_id + npc_attitudes）、`memory.update_summaries`；返回 `{"turn_id": turn_id + 1, "decision": None}`
   - `fallback(state) -> dict`：清空 pending（`player_inputs=[]`、`decision=None`、`check_results=[]`、`npc_reactions={}`、`narration=""`、`narration_segments=[]`、`degraded={}`），保留 `error`
 
 - [ ] **Step 1: 写失败测试**
@@ -2671,6 +2675,34 @@ def test_post_turn_persists_and_advances(repo, campaign):
     payload = json.loads(events[0].payload_json)
     assert payload["segments"][1]["speaker"] == "npc:barkeep"
 
+def test_post_turn_emits_scene_changed_on_move(repo, campaign):
+    repo.append_state(campaign.id, campaign.active_branch_id, 1,
+                      {"scene_id": "gate", "npc_attitudes": {}})
+    build_post_turn_node(repo, SpyMemory())(
+        base_state(campaign, decision={"scene_transition": {"to_scene": "tavern",
+                                                            "reason": "推门而入"}}))
+    events = repo.list_events(campaign.id, campaign.active_branch_id,
+                              types=["scene_changed"])
+    assert len(events) == 1
+    assert json.loads(events[0].payload_json) == {"from_scene": "gate",
+                                                  "to_scene": "tavern",
+                                                  "reason": "推门而入"}
+
+
+def test_post_turn_no_scene_changed_when_unchanged(repo, campaign):
+    repo.append_state(campaign.id, campaign.active_branch_id, 1,
+                      {"scene_id": "tavern", "npc_attitudes": {}})
+    build_post_turn_node(repo, SpyMemory())(base_state(campaign))
+    assert repo.list_events(campaign.id, campaign.active_branch_id,
+                            types=["scene_changed"]) == []
+
+
+def test_post_turn_no_scene_changed_without_prior_snapshot(repo, campaign):
+    build_post_turn_node(repo, SpyMemory())(base_state(campaign))
+    assert repo.list_events(campaign.id, campaign.active_branch_id,
+                            types=["scene_changed"]) == []
+
+
 def test_fallback_clears_pending_keeps_error():
     upd = fallback({"error": "decision_invalid", "npc_reactions": {"a": {}}, "narration": "x"})
     assert upd["error"] == "decision_invalid"  # error 保留（调用方读取后由 wait_input 清除）
@@ -2736,8 +2768,18 @@ def build_post_turn_node(repo, memory):
             repo.add_event(campaign_id, branch_id, turn_id, type="narration",
                            payload={"text": narration,
                                     "segments": state.get("narration_segments", [])})
+        # 场景移动回合：写 scene_changed 技术事件（持久化 + 供前端切换场景与 NPC 区，§4.3）
+        # get_state_at 语义为「≤ turn_id 的最新快照」：本轮快照随后才写入，此刻取到的
+        # 正是 intake 读过的回合初始状态（单写者：生产代码仅本节点写快照）
+        new_scene = state.get("scene_id")
+        old_scene = (repo.get_state_at(campaign_id, branch_id, turn_id) or {}).get("scene_id")
+        if old_scene and new_scene and old_scene != new_scene:
+            transition = (state.get("decision") or {}).get("scene_transition") or {}
+            repo.add_event(campaign_id, branch_id, turn_id, type="scene_changed",
+                           payload={"from_scene": old_scene, "to_scene": new_scene,
+                                    "reason": transition.get("reason") or ""})
         repo.append_state(campaign_id, branch_id, turn_id,
-                          {"scene_id": state.get("scene_id"),
+                          {"scene_id": new_scene,
                            "npc_attitudes": state.get("npc_attitudes", {})})
         memory.update_summaries(campaign_id, branch_id, turn_id)
         return {"turn_id": turn_id + 1, "decision": None}
@@ -3539,7 +3581,7 @@ git commit -m "feat(memory): Task 18b async summary queue with LLM summarizer wi
   - `build_npc_subgraph(client) -> CompiledStateGraph`（`START → assemble → speak → END`）
   - `build_npc_worker(subgraph) -> Callable[[dict], dict]`：Send 目标；成功 → `{"npc_reactions": {npc_id: reaction}}`；**任何异常 → 沉默占位** `{"npc_id": npc_id, "speech": "", "action": None}`（规格 §8：该 NPC 沉默，其余正常）
   - `build_npc_dispatch(module) -> Callable[[GameState], list[Send] | str]`（扇出规则**写死**）：
-    1. 候选 = `decision.proactive_npc_triggers` 中**存在**于模组的 npc_id（保序去重）
+    1. 候选 = `decision.proactive_npc_triggers` 中**存在于当前场景**（`scene.npcs`）的 npc_id（保序去重；不在场者静默忽略）
     2. 候选为空时回退：玩家输入文本中包含场景内某 NPC 的 `name` → 该 NPC（取模组顺序第一个）
     3. `budget_level in ("tight", "exceeded")` → 候选截取前 1（阶梯②）；否则截取前 2（防并行爆炸）
     4. 无候选 → 返回字符串 `"gm_narrate"`；否则返回 `[Send("npc_respond", task), ...]`
@@ -3548,7 +3590,10 @@ git commit -m "feat(memory): Task 18b async summary queue with LLM summarizer wi
 
 `backend/tests/graph/test_npc.py`：
 ```python
+import copy
+
 from app.config import Pricing, PricingEntry, Settings
+from app.content.schema import Module
 from app.graph.npc import (assemble_persona, build_npc_dispatch, build_npc_subgraph,
                            build_npc_worker)
 from app.llm.client import LLMClient
@@ -3607,14 +3652,24 @@ def test_worker_silent_when_llm_raises():
     out = worker(task_dict())
     assert out["npc_reactions"] == {"guard": {"npc_id": "guard", "speech": "", "action": None}}
 
-def test_dispatch_dedups_and_filters_unknown(mini_module):
+def test_dispatch_dedups_and_filters_out_of_scene(mini_module):
     d = build_npc_dispatch(mini_module)
     state = state_dict(decision={"proactive_npc_triggers": [
         {"npc_id": "guard", "trigger": "t1"}, {"npc_id": "guard"}, {"npc_id": "ghost"},
         {"npc_id": "barkeep", "trigger": "t2"}]})
-    sends = d(state)
-    assert [s.arg["npc_id"] for s in sends] == ["guard", "barkeep"]
+    sends = d(state)  # guard 在村口保留；ghost 未知、barkeep 在酒馆 → 都被过滤
+    assert [s.arg["npc_id"] for s in sends] == ["guard"]
     assert sends[0].arg["npc_name"] == "王守卫" and sends[0].arg["trigger"] == "t1"
+
+
+def test_dispatch_both_npcs_in_scene_two_sends(mini_module):
+    data = copy.deepcopy(mini_module.model_dump())
+    data["scenes"][0]["npcs"] = ["guard", "barkeep"]  # 同场景两人
+    mod = Module.model_validate(data)
+    d = build_npc_dispatch(mod)
+    state = state_dict(decision={"proactive_npc_triggers": [
+        {"npc_id": "guard", "trigger": "t1"}, {"npc_id": "barkeep", "trigger": "t2"}]})
+    assert [s.arg["npc_id"] for s in d(state)] == ["guard", "barkeep"]
 
 def test_dispatch_tight_keeps_first_only(mini_module):
     d = build_npc_dispatch(mini_module)
@@ -3768,13 +3823,13 @@ def build_npc_dispatch(module) -> Callable[[GameState], list[Send] | str]:
         decision = state.get("decision") or {}
         triggers_raw = decision.get("proactive_npc_triggers", [])
         scene = module.scene(state["scene_id"])
-        known = {n.id for n in module.npcs}
 
         triggers: dict[str, str] = {}
         candidates: list[str] = []
         for t in triggers_raw:
             npc_id = t.get("npc_id")
-            if npc_id in known and npc_id not in candidates:
+            # 仅在场的 NPC 可被触发；越界/不在场的触发静默忽略（防“幽灵在场”）
+            if npc_id in scene.npcs and npc_id not in candidates:
                 candidates.append(npc_id)
                 triggers[npc_id] = t.get("trigger", "")
 
@@ -3983,7 +4038,8 @@ git commit -m "feat(graph): memory_query node with tier-1 downgrade and failure 
   - 图结构（路由分支**全部**）：
     - `START → intake`；`intake` →（`error=="budget_paused"` → END **战役熔断**；否则 → `gm_decide`）
     - `gm_decide → validate`；`validate` →（error → `fallback`；否则 → `resolve_checks`）
-    - `resolve_checks`（`_guarded("resolve_failed", ...)` 包装）→（error → `fallback`；否则 → `memory_query`）
+    - `resolve_checks`（`_guarded("resolve_failed", ...)` 包装）→（error → `fallback`；否则 → `apply_transition`）
+    - `apply_transition`（应用 `scene_transition`，写入 state 供下游以新场景工作；非相邻目标忽略）→ `memory_query`
     - `memory_query` →（Send 扇出 → `npc_respond`；无候选 → `gm_narrate`）
     - `npc_respond → gm_narrate`；`gm_narrate` →（error → `fallback`；否则 → `post_turn`）
     - `post_turn → wait_input`；`wait_input → intake`（resume 后开启下一回合）；`fallback → wait_input`
@@ -3993,6 +4049,8 @@ git commit -m "feat(graph): memory_query node with tier-1 downgrade and failure 
 
 `backend/tests/graph/test_main_graph.py`：
 ```python
+import json
+
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import Command
 
@@ -4085,6 +4143,27 @@ def test_validate_failure_falls_back_to_wait(repo, campaign, mini_module):
     types = [e.type for e in repo.list_events(campaign.id, campaign.active_branch_id)]
     assert "narration" not in types and "check" not in types
 
+def test_scene_transition_moves_player(repo, campaign, mini_module):
+    move_decide = ('{"intent_summary": "进酒馆", "checks": [], "proactive_npc_triggers": [],'
+                   ' "scene_transition": {"to_scene": "tavern", "reason": "玩家推门"},'
+                   ' "memory_queries": []}')
+    graph, calls = make_env(repo, mini_module, {"qwen-plus": [
+        OPENING_DECIDE, OPENING_NARR, move_decide, "你推门走进酒馆，壁炉的热气扑面。"]})
+    cfg = config_for(repo, campaign)
+    graph.invoke(init_state(campaign), cfg)
+    graph.invoke(Command(resume={
+        "turn_id": 1,
+        "inputs": [{"player_id": "p1", "character_id": "pc_1", "text": "我走进酒馆"}],
+        "skipped": [],
+    }), cfg)
+    snap = graph.get_state(cfg)
+    assert snap.next == ("wait_input",)
+    assert snap.values["scene_id"] == "tavern"       # apply_transition 已生效
+    changed = repo.list_events(campaign.id, campaign.active_branch_id,
+                               types=["scene_changed"])
+    assert len(changed) == 1 and json.loads(changed[0].payload_json)["reason"] == "玩家推门"
+
+
 def test_paused_halts_without_llm(repo, campaign, mini_module):
     repo.record_usage(campaign.id, campaign.active_branch_id, 0, "gm", "qwen-plus",
                       1, 1, 5.0, 100)  # 成本超过默认上限 2.0
@@ -4121,8 +4200,9 @@ from langgraph.graph import END, START, StateGraph
 from app.graph.npc import build_npc_dispatch, build_npc_subgraph, build_npc_worker
 from app.graph.nodes.gm import build_decide_node, build_narrate_node, build_validate_node
 from app.graph.nodes.memory import build_memory_query_node
-from app.graph.nodes.turn import (build_intake_node, build_post_turn_node,
-                                  build_resolve_checks_node, fallback, wait_input)
+from app.graph.nodes.turn import (build_apply_transition_node, build_intake_node,
+                                  build_post_turn_node, build_resolve_checks_node,
+                                  fallback, wait_input)
 from app.graph.state import GameState
 
 
@@ -4155,7 +4235,7 @@ def _route_after_validate(state: GameState) -> str:
 
 
 def _route_after_resolve(state: GameState) -> str:
-    return "fallback" if state.get("error") else "memory_query"
+    return "fallback" if state.get("error") else "apply_transition"
 
 
 def _route_after_narrate(state: GameState) -> str:
@@ -4169,6 +4249,7 @@ def build_game_graph(repo, module, memory, client, guard, checkpointer=None):
     g.add_node("validate", build_validate_node(client))
     g.add_node("resolve_checks",
                _guarded("resolve_failed", build_resolve_checks_node(repo)))
+    g.add_node("apply_transition", build_apply_transition_node(module))
     g.add_node("memory_query", build_memory_query_node(memory))
     g.add_node("npc_respond", build_npc_worker(build_npc_subgraph(client)))
     g.add_node("gm_narrate", build_narrate_node(client, module))
@@ -4183,7 +4264,8 @@ def build_game_graph(repo, module, memory, client, guard, checkpointer=None):
     g.add_conditional_edges("validate", _route_after_validate,
                             {"fallback": "fallback", "resolve_checks": "resolve_checks"})
     g.add_conditional_edges("resolve_checks", _route_after_resolve,
-                            {"fallback": "fallback", "memory_query": "memory_query"})
+                            {"fallback": "fallback", "apply_transition": "apply_transition"})
+    g.add_edge("apply_transition", "memory_query")
     g.add_conditional_edges("memory_query", build_npc_dispatch(module),
                             ["npc_respond", "gm_narrate"])
     g.add_edge("npc_respond", "gm_narrate")   # Send 各分支全部完成后汇合

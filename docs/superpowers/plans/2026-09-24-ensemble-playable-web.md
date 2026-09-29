@@ -879,6 +879,16 @@ def build_post_turn_node(repo, memory, module=None):
                            payload={"text": narration,
                                     "segments": state.get("narration_segments", [])})
         decision = state.get("decision") or {}
+        # 场景移动回合：写 scene_changed 技术事件（持久化 + 供前端切换场景与 NPC 区，§4.3）
+        # get_state_at 语义为「≤ turn_id 的最新快照」：本轮快照随后才写入，此刻取到的
+        # 正是 intake 读过的回合初始状态（单写者：生产代码仅本节点写快照）
+        new_scene = state.get("scene_id")
+        old_scene = (repo.get_state_at(campaign_id, branch_id, turn_id) or {}).get("scene_id")
+        if old_scene and new_scene and old_scene != new_scene:
+            transition = decision.get("scene_transition") or {}
+            repo.add_event(campaign_id, branch_id, turn_id, type="scene_changed",
+                           payload={"from_scene": old_scene, "to_scene": new_scene,
+                                    "reason": transition.get("reason") or ""})
         for clue_id in decision.get("clues_revealed", []):
             content = ""
             if module is not None:
@@ -892,7 +902,7 @@ def build_post_turn_node(repo, memory, module=None):
                                MemoryEvent(type="clue", text=content or clue_id,
                                            turn_id=turn_id))
         repo.append_state(campaign_id, branch_id, turn_id,
-                          {"scene_id": state.get("scene_id"),
+                          {"scene_id": new_scene,
                            "npc_attitudes": state.get("npc_attitudes", {})})
         memory.update_summaries(campaign_id, branch_id, turn_id)
         return {"turn_id": turn_id + 1, "decision": None,
@@ -1699,7 +1709,7 @@ git commit -m "feat(api): branch restore with L2 copy and checkpoint chain fork"
     - `token`：`{speaker, text}` 叙事增量；`{reset: true}` 表示本回合重新生成（清空后接收新 token）
     - `dice`：`{actor, skill, skill_value, difficulty, roll, level, seed, success}`
     - `actor`：`{player_id, text}`（某玩家已提交行动）
-    - `scene`：`{scene_id, name, description, npcs}`
+    - `scene`：`{scene_id, name, description, npcs, reason?}`（`reason` 由 `scene_changed` 事件驱动时携带）
     - `turn`：`{phase, turn_id, ending_reached?}`（`phase ∈ resolving|collecting|ended|paused`）
     - `state`：全量状态快照（结构见 T10 `_state_payload`；重连 resync 时含 `segments/dice/phase`）
     - `clue`：`{clue_id, text}`（新线索揭示）
@@ -2054,7 +2064,7 @@ git commit -m "feat(api): turn buffer state machine with single-player debounce 
 **Interfaces:**
 - Consumes: `build_game_graph`/`build_checkpointer`（M2）、`EventBus`（M3-8）、`TurnBuffer`（M3-9）、`AppDeps`（M3-5）、`load_pricing`/`JournalMemory`/`BudgetGuard`（M2）
 - Produces：
-  - `RoomSession`（dataclass）：`campaign_id, repo, settings, module, graph, bus, buffer, branch_id, started, driving, ended, prev_scene, last_clue_id, window_task, window_started`；`config` property = `{"configurable": {"thread_id": branch_id}}`
+  - `RoomSession`（dataclass）：`campaign_id, repo, settings, module, graph, bus, buffer, branch_id, started, driving, ended, prev_scene, last_clue_id, last_scene_id, window_task, window_started`；`config` property = `{"configurable": {"thread_id": branch_id}}`
   - `SessionManager(deps)`（`deps` 鸭子类型：`.settings/.repo/.model_factory`）：
     - `get(campaign_id) -> RoomSession`（不存在 `KeyError`）
     - `ensure_started(campaign_id) -> RoomSession`：幂等；首访组装会话并驱动开场（或挂起续玩开窗），并发连接不重复驱动
@@ -2065,7 +2075,7 @@ git commit -m "feat(api): turn buffer state machine with single-player debounce 
   - 驱动语义（**图的唯一驱动者**）：
     - `_drive(session, inp)`：`async for chunk in graph.astream(inp, config, stream_mode="custom")` → 逐条 `bus.push("token", chunk)`；异常不致命（push `error`）
     - resume 一律 `Command(resume=payload, update={"branch_id": session.branch_id})`——修正 M3-7 fork 恢复后 checkpoint 内的旧 branch_id
-    - 收口 `_push_snapshot`：从 L2 读权威结果推 `dice`（按刚结束回合）、新 `clue`、场景变化 `scene`、`state` 快照；然后按挂起状态推 `turn`：`collecting`（开窗）/ `paused`（预算熔断或中间态，仅熔断锁输入）/ `ended`（结局）
+    - 收口 `_push_snapshot`：从 L2 读权威结果推 `dice`（按刚结束回合）、新 `clue`、`scene_changed` 事件 → `scene`（含 `reason`；无事件时仅“会话首推”兜底）、`state` 快照；然后按挂起状态推 `turn`：`collecting`（开窗）/ `paused`（预算熔断或中间态，仅熔断锁输入）/ `ended`（结局）
     - 窗口定时器：0.05s 轮询 `should_close`，凭 `buffer.epoch` 判断过期退出
   - 细节约定：
     - `budget_paused`：push `error` + `turn(paused)`，**不开窗口**（前端锁输入）
@@ -2289,6 +2299,16 @@ def _dice_payload(row) -> dict:
             "seed": row.seed, "success": row.level in _SUCCESS_LEVELS}
 
 
+def _scene_payload(session, scene_id) -> dict | None:
+    """场景展示数据；scene_id 不在模组中（越界/历史分支）→ None。"""
+    try:
+        scene = session.module.scene(scene_id)
+    except KeyError:
+        return None
+    return {"scene_id": scene.id, "name": scene.name,
+            "description": scene.description, "npcs": list(scene.npcs)}
+
+
 @dataclass
 class RoomSession:
     campaign_id: str
@@ -2306,6 +2326,7 @@ class RoomSession:
     ended: bool = False
     prev_scene: str | None = None
     last_clue_id: int = 0
+    last_scene_id: int = 0
     window_task: asyncio.Task | None = None
     window_started: float = 0.0
 
@@ -2458,16 +2479,22 @@ class SessionManager:
             if event.id is not None and event.id > session.last_clue_id:
                 session.last_clue_id = event.id
                 session.bus.push("clue", json.loads(event.payload_json))
+        for event in session.repo.list_events(session.campaign_id, session.branch_id,
+                                              types=["scene_changed"]):
+            if event.id is not None and event.id > session.last_scene_id:
+                session.last_scene_id = event.id
+                changed = json.loads(event.payload_json)
+                payload = _scene_payload(session, changed.get("to_scene"))
+                if payload is not None:
+                    session.prev_scene = payload["scene_id"]
+                    session.bus.push("scene", {**payload,
+                                               "reason": changed.get("reason", "")})
         scene_id = values.get("scene_id")
-        if scene_id and scene_id != session.prev_scene:
-            session.prev_scene = scene_id
-            try:
-                scene = session.module.scene(scene_id)
-                session.bus.push("scene", {"scene_id": scene.id, "name": scene.name,
-                                           "description": scene.description,
-                                           "npcs": list(scene.npcs)})
-            except KeyError:
-                pass
+        if scene_id and session.prev_scene is None:      # 首推兜底：本会话尚未推送过场景
+            payload = _scene_payload(session, scene_id)
+            if payload is not None:
+                session.prev_scene = payload["scene_id"]
+                session.bus.push("scene", payload)
         session.bus.push("state", self._state_payload(session))
 
         error = values.get("error")
@@ -4553,7 +4580,7 @@ git commit -m "feat(frontend): dice scramble animation, side panels and ending o
 - Consumes: `create_app`/`AppDeps`（M3-11）、`load_settings`/`make_engine`/`init_db`（M2）、`make_default_character`（M2）、`FakeLLM`（M2）、misty_hollow 模组（M2 Task 23 已创建于 `modules/misty_hollow.yaml`）
 - Produces：
   - `backend/app/serve.py`：`build_app() -> FastAPI`（load_settings → make_engine → init_db → SqliteRepository → create_app）；模块级 `app = build_app()`（`uvicorn app.serve:app` 即可启动）
-  - E2E 验收测试：真实 WS 协议走通 misty_hollow 三回合（开场 → 检定+线索 → 结局），并验证断线重连的**全量回放**与继续游玩
+  - E2E 验收测试：真实 WS 协议走通 misty_hollow 三回合（开场 → 检定+线索 → 结局），验证断线重连的**全量回放**与继续游玩，以及场景移动回合的 `scene` 事件推送（`apply_transition` → `scene_changed` → WS）
   - `README.md`：环境准备、后端/前端启动步骤、浏览器手测验收清单、测试命令
 
 - [ ] **Step 1: 写 serve 入口测试**
@@ -4679,7 +4706,7 @@ def make_script(char_id: str) -> list[str]:
             ending_decide, "石台在轰鸣中崩塌，缠绕镇子的低语骤然停止。"]
 
 
-def build_env(tmp_path):
+def build_env(tmp_path, script=None):
     engine = make_engine(str(tmp_path / "e2e.db"))
     init_db(engine)
     repo = SqliteRepository(engine)
@@ -4693,7 +4720,8 @@ def build_env(tmp_path):
     char = make_default_character(player.id, "张三")
     repo.append_character(campaign.id, campaign.active_branch_id, 0, char.id, asdict(char))
     deps = AppDeps(settings=settings, repo=repo,
-                   model_factory=script_factory(make_script(char.id)))
+                   model_factory=script_factory(script if script is not None
+                                                else make_script(char.id)))
     return create_app(deps), repo, campaign, player, char
 
 
@@ -4775,6 +4803,39 @@ def test_reconnect_replays_full_history_and_can_continue(tmp_path):
             ended = [e for e in replayed if e["type"] == "turn"
                      and e["payload"].get("phase") == "ended"]
             assert ended[-1]["payload"]["ending_reached"] == "ending_break"
+
+
+MOVE_SCRIPT = [
+    json.dumps({"intent_summary": "开场", "checks": [], "proactive_npc_triggers": [],
+                "scene_transition": None, "memory_queries": []}),
+    "暮色把雾霭镇压得很低，无面的神像俯视着广场。",
+    json.dumps({"intent_summary": "前往白鹭旅店", "checks": [],
+                "proactive_npc_triggers": [],
+                "scene_transition": {"to_scene": "inn", "reason": "推门而入"},
+                "memory_queries": []}),
+    "你推门走进白鹭旅店，壁炉的暖意扑面而来。",
+]
+
+
+def test_scene_move_pushes_scene_event(tmp_path):
+    """移动回合：apply_transition → post_turn 落 scene_changed → WS 推 scene（含 reason）。"""
+    app, repo, campaign, player, char = build_env(tmp_path, script=MOVE_SCRIPT)
+    events: list[dict] = []
+    with TestClient(app) as client:
+        url = f"/ws/campaign/{campaign.id}?player_id={player.id}"
+        with client.websocket_connect(url) as ws:
+            pump_until(ws, events, _collecting(1))             # 回合 0：开场（广场首推）
+            assert any(e["type"] == "scene" and e["payload"]["scene_id"] == "square"
+                       for e in events)
+            ws.send_text(json.dumps({"type": "input", "text": "我推门走进白鹭旅店"}))
+            pump_until(ws, events, lambda evts: any(     # 回合 1：场景切换推送新场景
+                e["type"] == "scene" and e["payload"].get("scene_id") == "inn"
+                for e in evts))
+            moved = [e for e in events if e["type"] == "scene"
+                     and e["payload"].get("scene_id") == "inn"]
+            assert moved[-1]["payload"]["reason"] == "推门而入"
+        detail = client.get(f"/api/campaigns/{campaign.id}").json()   # REST 回查落库
+        assert detail["scene_id"] == "inn"
 ```
 
 - [ ] **Step 6: 运行 E2E（与后端全量回归）**
