@@ -18,7 +18,7 @@
 - 骰子实现固定为：`seed = secrets.randbits(64)` → `random.Random(seed)` → 掷骰；**读档默认重掷**；seed 必须随 DiceRecord 落库
 - 关联键：`campaign_id`；分支 thread：`thread_id = {campaign_id}@{branch_id}`，主分支 `branch_id = "main"`
 - L2 领域库 **append-only + 版本化**（所有事件与状态变更带 `branch_id + turn_id`，按"目标 turn 之前的最新版本"查询，不做物理删除）
-- 模型分级路由：`gm` = qwen-plus（DashScope OpenAI 兼容端点）、`npc` = deepseek-chat、`extractor` = qwen-turbo；定价来自 `config/pricing.yaml`，**不得硬编码**
+- 模型分级路由：`gm` / `cheap` / `extractor` = qwen3.8-flash（DashScope OpenAI 兼容端点）、`npc` = deepseek-flash；定价来自 `config/pricing.yaml`，**不得硬编码**
 - 降级矩阵（规格 §8）与预算熔断阶梯 ①~④（规格 §9）语义固定：①记忆降档 ②NPC 收缩到 gm_decide 首位相关 NPC ③GM 换便宜模型 ④战役熔断暂停
 - 叙事有序性：NPC 台词不独立外发；`gm_narrate` 统一编排。M2 用内联标记 `[[npc:<npc_id>]]台词[[/npc]]` 表达说话人，由 `parse_segments` 解析
 - 失败不推进时回到 `wait_input`，本轮 pending 丢弃（与"读档重掷"语义一致）
@@ -1372,9 +1372,9 @@ def test_dice_record_persists_seed(repo, campaign):
 
 def test_usage_totals(repo, campaign):
     b = campaign.active_branch_id
-    repo.record_usage(campaign.id, b, 1, "gm", "qwen-plus", 100, 200, 0.002, 900)
-    repo.record_usage(campaign.id, b, 1, "npc", "deepseek-chat", 50, 80, 0.0005, 700)
-    repo.record_usage(campaign.id, b, 2, "gm", "qwen-plus", 10, 20, 0.0002, 800)
+    repo.record_usage(campaign.id, b, 1, "gm", "qwen3.8-flash", 100, 200, 0.002, 900)
+    repo.record_usage(campaign.id, b, 1, "npc", "deepseek-flash", 50, 80, 0.0005, 700)
+    repo.record_usage(campaign.id, b, 2, "gm", "qwen3.8-flash", 10, 20, 0.0002, 800)
     assert repo.turn_token_total(campaign.id, b, 1) == 430
     assert repo.turn_token_total(campaign.id, b, 2) == 30
     assert abs(repo.campaign_cost_total(campaign.id) - 0.0027) < 1e-9
@@ -1494,8 +1494,8 @@ git commit -m "feat(storage): dice records, usage accounting, branch history"
 - Consumes: 无
 - Produces：
   - `PricingEntry(input_per_1k: float, output_per_1k: float)`；`Pricing(models: dict[str, PricingEntry])`；`load_pricing(path) -> Pricing`
-  - `Settings`（字段写死，后续任务按名引用）：`sqlite_path="ensemble.db"`, `pricing_path="config/pricing.yaml"`, `gm_model="qwen-plus"`, `cheap_model="qwen-turbo"`, `npc_model="deepseek-chat"`, `extractor_model="qwen-turbo"`, `qwen_base_url`, `deepseek_base_url`, `qwen_api_key: str|None`, `deepseek_api_key: str|None`, `request_timeout_seconds=60`, `turn_window_seconds=60`, `turn_token_cap=30000`, `campaign_cost_cap_usd=2.0`
-  - `load_settings() -> Settings`（读环境变量 `ENSEMBLE_SQLITE_PATH` / `DASHSCOPE_API_KEY` / `DEEPSEEK_API_KEY`）
+  - `Settings`（字段写死，后续任务按名引用）：`sqlite_path="ensemble.db"`, `pricing_path="config/pricing.yaml"`, `gm_model="qwen3.8-flash"`, `cheap_model="qwen3.8-flash"`（生产两档同名；验证切换路由的测试用虚构模型名覆盖）, `npc_model="deepseek-flash"`, `extractor_model="qwen3.8-flash"`, `qwen_base_url`, `deepseek_base_url`, `qwen_api_key: str|None`, `deepseek_api_key: str|None`, `request_timeout_seconds=60`, `turn_window_seconds=60`, `turn_token_cap=30000`, `campaign_cost_cap_usd=10.0`, `enable_thinking=False`（qwen 思考模式开关，默认关省 token）
+  - `load_settings() -> Settings`（读环境变量 `ENSEMBLE_SQLITE_PATH` / `DASHSCOPE_API_KEY` / `DEEPSEEK_API_KEY` / `ENSEMBLE_TURN_TOKEN_CAP` / `ENSEMBLE_CAMPAIGN_COST_CAP_USD` / `ENSEMBLE_ENABLE_THINKING`）
 
 - [ ] **Step 1: 写失败测试**
 
@@ -1507,9 +1507,25 @@ from app.config import load_pricing, load_settings
 def test_defaults_and_env_override(monkeypatch):
     monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
     s = load_settings()
-    assert s.gm_model == "qwen-plus" and s.turn_window_seconds == 60
+    assert s.gm_model == "qwen3.8-flash" and s.turn_window_seconds == 60
     monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
     assert load_settings().deepseek_api_key == "sk-test"
+
+def test_budget_caps_env_override(monkeypatch):
+    monkeypatch.delenv("ENSEMBLE_TURN_TOKEN_CAP", raising=False)
+    monkeypatch.delenv("ENSEMBLE_CAMPAIGN_COST_CAP_USD", raising=False)
+    s = load_settings()
+    assert s.turn_token_cap == 30000 and s.campaign_cost_cap_usd == 10.0
+    monkeypatch.setenv("ENSEMBLE_TURN_TOKEN_CAP", "100")
+    monkeypatch.setenv("ENSEMBLE_CAMPAIGN_COST_CAP_USD", "999999")
+    s2 = load_settings()
+    assert s2.turn_token_cap == 100 and s2.campaign_cost_cap_usd == 999999.0
+
+def test_enable_thinking_defaults_off_with_env_override(monkeypatch):
+    monkeypatch.delenv("ENSEMBLE_ENABLE_THINKING", raising=False)
+    assert load_settings().enable_thinking is False
+    monkeypatch.setenv("ENSEMBLE_ENABLE_THINKING", "1")
+    assert load_settings().enable_thinking is True
 
 def test_pricing_loaded_from_yaml(tmp_path):
     p = tmp_path / "pricing.yaml"
@@ -1520,7 +1536,9 @@ def test_pricing_loaded_from_yaml(tmp_path):
 def test_repo_pricing_covers_routed_models():
     repo_root = Path(__file__).resolve().parents[2]
     pricing = load_pricing(repo_root / "config" / "pricing.yaml")
-    assert {"qwen-plus", "qwen-turbo", "deepseek-chat"} <= set(pricing.models)
+    s = load_settings()
+    routed = {s.gm_model, s.cheap_model, s.npc_model, s.extractor_model}
+    assert routed <= set(pricing.models)
 ```
 
 - [ ] **Step 2: 验证失败**
@@ -1557,10 +1575,10 @@ def load_pricing(path: str | Path) -> Pricing:
 class Settings(BaseModel):
     sqlite_path: str = "ensemble.db"
     pricing_path: str = "config/pricing.yaml"
-    gm_model: str = "qwen-plus"
-    cheap_model: str = "qwen-turbo"
-    npc_model: str = "deepseek-chat"
-    extractor_model: str = "qwen-turbo"
+    gm_model: str = "qwen3.8-flash"
+    cheap_model: str = "qwen3.8-flash"
+    npc_model: str = "deepseek-flash"
+    extractor_model: str = "qwen3.8-flash"
     qwen_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     deepseek_base_url: str = "https://api.deepseek.com/v1"
     qwen_api_key: str | None = None
@@ -1568,7 +1586,8 @@ class Settings(BaseModel):
     request_timeout_seconds: int = 60
     turn_window_seconds: int = 60
     turn_token_cap: int = 30000
-    campaign_cost_cap_usd: float = 2.0
+    campaign_cost_cap_usd: float = 10.0
+    enable_thinking: bool = False   # qwen 系思考模式：要快+省，默认关（ENSEMBLE_ENABLE_THINKING=1 开启）
 
 
 def load_settings() -> Settings:
@@ -1576,6 +1595,9 @@ def load_settings() -> Settings:
         sqlite_path=os.environ.get("ENSEMBLE_SQLITE_PATH", "ensemble.db"),
         qwen_api_key=os.environ.get("DASHSCOPE_API_KEY"),
         deepseek_api_key=os.environ.get("DEEPSEEK_API_KEY"),
+        turn_token_cap=int(os.environ.get("ENSEMBLE_TURN_TOKEN_CAP", "30000")),
+        campaign_cost_cap_usd=float(os.environ.get("ENSEMBLE_CAMPAIGN_COST_CAP_USD", "10.0")),
+        enable_thinking=os.environ.get("ENSEMBLE_ENABLE_THINKING", "").lower() in ("1", "true"),
     )
 ```
 
@@ -1584,16 +1606,16 @@ def load_settings() -> Settings:
 `config/pricing.yaml`：
 ```yaml
 # 价格仅用于成本估算，请按厂商官网更新（单位：美元 / 1K tokens）
+# 换算基准：人民币按约 7.1 汇率折美元；deepseek-flash 取高峰时段、缓存未命中价（保守值）
 models:
-  qwen-plus: { input_per_1k: 0.0008, output_per_1k: 0.002 }
-  qwen-turbo: { input_per_1k: 0.0003, output_per_1k: 0.0006 }
-  deepseek-chat: { input_per_1k: 0.00027, output_per_1k: 0.0011 }
+  qwen3.8-flash: { input_per_1k: 0.000113, output_per_1k: 0.00038 }
+  deepseek-flash: { input_per_1k: 0.00028, output_per_1k: 0.00113 }
 ```
 
 - [ ] **Step 5: 验证通过**
 
 Run: `cd backend; uv run pytest tests/test_config.py -q`
-Expected: PASS（3 passed）
+Expected: PASS（5 passed）
 
 - [ ] **Step 6: Commit**
 
@@ -1618,11 +1640,15 @@ git commit -m "feat(config): settings and configurable pricing table"
   - `LlmContext`（dataclass）：`campaign_id`、`branch_id`、`turn_id`
   - `Role = Literal["gm", "npc", "extractor"]`
   - `UsageSink(Protocol)`：`record_usage(campaign_id, branch_id, turn_id, role, model, tokens_in, tokens_out, cost_usd, latency_ms) -> None`
+  - `BudgetPausedError(RuntimeError)`：预算 paused 时拒绝调用的异常（规格 §9 ④）
   - `compute_cost(pricing: Pricing, model: str, tokens_in: int, tokens_out: int) -> float`（未知模型返回 0.0）
-  - `LLMClient(settings, pricing, usage_sink=None, model_factory=None)`；`chat(role, messages, ctx, cheap=False) -> str`
+  - `LLMClient(settings, pricing, usage_sink=None, model_factory=None, budget_probe=None)`；`chat(role, messages, ctx, cheap=False) -> str`
     - 路由：gm → `gm_model`（`cheap=True` 时用 `cheap_model`）；npc → `npc_model`；extractor → `extractor_model`；模型名前缀 `deepseek` → deepseek 端点/密钥，否则 qwen 端点/密钥
-    - 工厂签名：`(model: str, base_url: str | None, api_key: str | None) -> ChatModel`；默认工厂返回 `OpenAICompatModel`
-  - `OpenAICompatModel(api_key, base_url, model, timeout_seconds)`：真实 OpenAI 兼容客户端（本计划测试不触网，仅 CLI 联机时使用）
+    - **预算检查点②（规格 §9）**：每次调用前若无显式 `cheap` 则运行 `budget_probe(ctx)`——`exceeded` → 自动降档 `cheap=True`；`paused` → 抛 `BudgetPausedError`（节点侧按失败不推进兜底）
+    - 工厂签名：`(model: str, base_url: str | None, api_key: str | None) -> ChatModel`；默认工厂 `_make_cached_factory(settings)` 按 `(model, base_url, api_key)` 缓存实例（连接池复用），并透传 `request_timeout_seconds` 与 `enable_thinking`
+  - `make_repo_budget_probe(repo, guard) -> Callable[[LlmContext], str]`：读 `turn_token_total` + `campaign_cost_total` 的实时探针
+  - `OpenAICompatModel(api_key, base_url, model, timeout_seconds=60, enable_thinking=False)`：真实 OpenAI 兼容客户端，**懒加载** OpenAI 实例（本计划测试不触网，仅 CLI 联机时使用）；qwen 系默认关思考模式（`extra_body={"enable_thinking": False}`，省 token），deepseek 不传该字段
+  - `_request_kwargs(model, enable_thinking, messages) -> dict`：请求体纯函数（思考开关按模型前缀分派）
   - `FakeLLM(script: list[str | ChatResponse], tokens_in=10, tokens_out=20)`：按序返回脚本项；记录 `calls: list[list[ChatMessage]]`；脚本耗尽抛 `IndexError("FakeLLM script exhausted")`
 
 - [ ] **Step 1: 写失败测试**
@@ -1631,7 +1657,8 @@ git commit -m "feat(config): settings and configurable pricing table"
 ```python
 import pytest
 from app.config import Pricing, PricingEntry, Settings
-from app.llm.client import ChatMessage, LLMClient, LlmContext, compute_cost
+from app.llm.client import (BudgetPausedError, ChatMessage, LLMClient, LlmContext,
+                            _request_kwargs, compute_cost)
 from app.llm.fakes import FakeLLM
 
 MSGS = [ChatMessage(role="user", content="你好")]
@@ -1640,15 +1667,20 @@ CTX = LlmContext(campaign_id="c1", branch_id="c1@main", turn_id=1)
 class RecordingSink:
     def __init__(self):
         self.rows = []
-    def record_usage(self, *args, **kwargs):
-        self.rows.append(kwargs)
+    def record_usage(self, campaign_id, branch_id, turn_id, role, model,
+                     tokens_in, tokens_out, cost_usd, latency_ms) -> None:
+        self.rows.append({
+            "campaign_id": campaign_id, "branch_id": branch_id, "turn_id": turn_id,
+            "role": role, "model": model, "tokens_in": tokens_in, "tokens_out": tokens_out,
+            "cost_usd": cost_usd, "latency_ms": latency_ms,
+        })
 
-def make_client(script_texts):
-    settings = Settings()
+def make_client(script_texts, settings=None, budget_probe=None):
+    if settings is None:
+        settings = Settings()
     pricing = Pricing(models={
-        "qwen-plus": PricingEntry(input_per_1k=0.0008, output_per_1k=0.002),
-        "qwen-turbo": PricingEntry(input_per_1k=0.0003, output_per_1k=0.0006),
-        "deepseek-chat": PricingEntry(input_per_1k=0.00027, output_per_1k=0.0011),
+        "qwen3.8-flash": PricingEntry(input_per_1k=0.000113, output_per_1k=0.00038),
+        "deepseek-flash": PricingEntry(input_per_1k=0.00028, output_per_1k=0.00113),
     })
     sink = RecordingSink()
     built: dict[str, FakeLLM] = {}
@@ -1657,26 +1689,27 @@ def make_client(script_texts):
         built[model] = FakeLLM(list(script_texts))
         return built[model]
 
-    return LLMClient(settings, pricing, usage_sink=sink, model_factory=factory), sink, built
+    return LLMClient(settings, pricing, usage_sink=sink, model_factory=factory,
+                     budget_probe=budget_probe), sink, built
 
 def test_routes_role_to_configured_model_and_records_usage():
     client, sink, built = make_client(["GM 的回复"])
     text = client.chat("gm", MSGS, CTX)
     assert text == "GM 的回复"
-    assert "qwen-plus" in built
+    assert "qwen3.8-flash" in built
     row = sink.rows[0]
-    assert row["role"] == "gm" and row["model"] == "qwen-plus"
+    assert row["role"] == "gm" and row["model"] == "qwen3.8-flash"
     assert row["tokens_in"] == 10 and row["tokens_out"] == 20 and row["cost_usd"] > 0
 
 def test_cheap_switch_uses_cheap_model():
-    client, sink, built = make_client(["兜底回复"])
+    client, sink, built = make_client(["兜底回复"], settings=Settings(cheap_model="alt-cheap-model"))
     client.chat("gm", MSGS, CTX, cheap=True)
-    assert "qwen-turbo" in built and sink.rows[0]["model"] == "qwen-turbo"
+    assert "alt-cheap-model" in built and sink.rows[0]["model"] == "alt-cheap-model"
 
 def test_npc_role_uses_deepseek():
     client, sink, built = make_client(["NPC 的话"])
     client.chat("npc", MSGS, CTX)
-    assert "deepseek-chat" in built
+    assert "deepseek-flash" in built
 
 def test_cost_computation_and_unknown_model():
     pricing = Pricing(models={"a": PricingEntry(input_per_1k=0.001, output_per_1k=0.002)})
@@ -1687,6 +1720,53 @@ def test_fake_llm_exhaustion():
     f = FakeLLM([])
     with pytest.raises(IndexError):
         f.chat(MSGS)
+
+def test_budget_probe_exceeded_switches_gm_to_cheap():
+    """检查点②：调用前探针报 exceeded → 本次 GM 调用自动走 cheap 档。"""
+    client, sink, built = make_client(
+        ["兜底回复"], settings=Settings(cheap_model="alt-cheap-model"),
+        budget_probe=lambda ctx: "exceeded")
+    client.chat("gm", MSGS, CTX)
+    assert sink.rows[0]["model"] == "alt-cheap-model"
+
+def test_budget_probe_ok_keeps_normal_model():
+    client, sink, built = make_client(["正常回复"], budget_probe=lambda ctx: "ok")
+    client.chat("gm", MSGS, CTX)
+    assert sink.rows[0]["model"] == "qwen3.8-flash"
+
+def test_budget_probe_paused_blocks_call_without_usage():
+    """战役成本触顶：调用被拒绝（抛 BudgetPausedError），不触发模型也不记账。"""
+    client, sink, built = make_client(["从未被调用"], budget_probe=lambda ctx: "paused")
+    with pytest.raises(BudgetPausedError):
+        client.chat("gm", MSGS, CTX)
+    assert sink.rows == [] and "qwen3.8-flash" not in built
+
+def test_budget_probe_skipped_when_cheap_explicit():
+    probed = []
+    client, sink, built = make_client(
+        ["x"], budget_probe=lambda ctx: probed.append(ctx) or "ok")
+    client.chat("gm", MSGS, CTX, cheap=True)   # 已显式 cheap → 无需探测
+    assert probed == []
+
+def test_request_kwargs_disables_thinking_for_qwen_by_default():
+    """qwen 系默认关闭思考模式（extra_body.enable_thinking=False，省 token）。"""
+    kw = _request_kwargs("qwen3.8-flash", False, MSGS)
+    assert kw["extra_body"] == {"enable_thinking": False}
+    assert kw["messages"] == [{"role": "user", "content": "你好"}]
+
+def test_request_kwargs_keeps_thinking_when_enabled():
+    assert "extra_body" not in _request_kwargs("qwen3.8-flash", True, MSGS)
+
+def test_request_kwargs_never_sends_extra_body_to_deepseek():
+    assert "extra_body" not in _request_kwargs("deepseek-flash", False, MSGS)
+
+def test_default_factory_reuses_model_instances():
+    """默认工厂按 (model, base_url, api_key) 缓存实例（避免每次调用重建连接池）。"""
+    client = LLMClient(Settings(), Pricing(models={}))
+    m1 = client._factory("qwen3.8-flash", "http://localhost", "k")
+    m2 = client._factory("qwen3.8-flash", "http://localhost", "k")
+    assert m1 is m2
+    assert client._factory("deepseek-flash", None, None) is not m1
 ```
 
 - [ ] **Step 2: 验证失败**
@@ -1706,6 +1786,7 @@ from typing import Callable, Literal, Protocol
 from pydantic import BaseModel
 
 from app.config import Pricing, Settings
+from app.llm.usage import BudgetGuard, BudgetLevel
 
 Role = Literal["gm", "npc", "extractor"]
 
@@ -1738,6 +1819,10 @@ class UsageSink(Protocol):
                      latency_ms: int) -> None: ...
 
 
+class BudgetPausedError(RuntimeError):
+    """战役成本触顶：LLM 调用被拒绝（规格 §9 ④；节点侧按失败不推进兜底）。"""
+
+
 def compute_cost(pricing: Pricing, model: str, tokens_in: int, tokens_out: int) -> float:
     entry = pricing.models.get(model)
     if entry is None:
@@ -1749,16 +1834,24 @@ class OpenAICompatModel:
     """OpenAI 兼容客户端（qwen / deepseek 均走此实现）。"""
 
     def __init__(self, api_key: str | None, base_url: str | None, model: str,
-                 timeout_seconds: int = 60):
-        from openai import OpenAI
+                 timeout_seconds: int = 60, enable_thinking: bool = False):
         self.model = model
-        self._client = OpenAI(api_key=api_key, base_url=base_url, timeout=timeout_seconds)
+        self._api_key = api_key
+        self._base_url = base_url
+        self._timeout_seconds = timeout_seconds
+        self._enable_thinking = enable_thinking
+        self._client = None          # 懒加载并复用（连接池）
+
+    def _openai_client(self):
+        if self._client is None:
+            from openai import OpenAI
+            self._client = OpenAI(api_key=self._api_key, base_url=self._base_url,
+                                  timeout=self._timeout_seconds)
+        return self._client
 
     def chat(self, messages: list[ChatMessage]) -> ChatResponse:
-        resp = self._client.chat.completions.create(
-            model=self.model,
-            messages=[m.model_dump() for m in messages],
-        )
+        resp = self._openai_client().chat.completions.create(
+            **_request_kwargs(self.model, self._enable_thinking, messages))
         usage = resp.usage
         return ChatResponse(
             text=resp.choices[0].message.content or "",
@@ -1767,23 +1860,63 @@ class OpenAICompatModel:
         )
 
 
+def _request_kwargs(model: str, enable_thinking: bool,
+                    messages: list[ChatMessage]) -> dict:
+    """请求体组装：qwen 系默认关闭思考模式（省 token）；deepseek 不传该字段。"""
+    kwargs: dict = {"model": model, "messages": [m.model_dump() for m in messages]}
+    if model.startswith("qwen") and not enable_thinking:
+        kwargs["extra_body"] = {"enable_thinking": False}
+    return kwargs
+
+
 ModelFactory = Callable[[str, "str | None", "str | None"], ChatModel]
 
 
-def _default_factory(model: str, base_url: str | None, api_key: str | None) -> ChatModel:
-    return OpenAICompatModel(api_key=api_key, base_url=base_url, model=model)
+def _make_cached_factory(settings: Settings) -> ModelFactory:
+    """默认工厂：按 (model, base_url, api_key) 缓存实例（连接池复用 + 透传超时与思考开关）。"""
+    cache: dict[tuple[str, str | None, str | None], ChatModel] = {}
+
+    def factory(model: str, base_url: str | None, api_key: str | None) -> ChatModel:
+        key = (model, base_url, api_key)
+        if key not in cache:
+            cache[key] = OpenAICompatModel(api_key=api_key, base_url=base_url, model=model,
+                                           timeout_seconds=settings.request_timeout_seconds,
+                                           enable_thinking=settings.enable_thinking)
+        return cache[key]
+
+    return factory
+
+
+def make_repo_budget_probe(repo, guard: BudgetGuard) -> Callable[[LlmContext], str]:
+    """检查点②探针（规格 §9）：每次 LLM 调用前读该回合与战役的实时累计。"""
+
+    def probe(ctx: LlmContext) -> str:
+        return str(guard.check(
+            repo.turn_token_total(ctx.campaign_id, ctx.branch_id, ctx.turn_id),
+            repo.campaign_cost_total(ctx.campaign_id)))
+
+    return probe
 
 
 class LLMClient:
     def __init__(self, settings: Settings, pricing: Pricing,
-                 usage_sink: UsageSink | None = None, model_factory: ModelFactory | None = None):
+                 usage_sink: UsageSink | None = None, model_factory: ModelFactory | None = None,
+                 budget_probe: Callable[[LlmContext], str] | None = None):
         self._settings = settings
         self._pricing = pricing
         self._usage_sink = usage_sink
-        self._factory: ModelFactory = model_factory or _default_factory
+        self._factory: ModelFactory = model_factory or _make_cached_factory(settings)
+        self._budget_probe = budget_probe
 
     def chat(self, role: Role, messages: list[ChatMessage], ctx: LlmContext,
              cheap: bool = False) -> str:
+        # 检查点②（规格 §9）：每次调用前读实时累计——exceeded 自动降档，paused 拒绝调用
+        if not cheap and self._budget_probe is not None:
+            level = str(self._budget_probe(ctx))
+            if level == BudgetLevel.PAUSED:
+                raise BudgetPausedError("campaign cost cap reached")
+            if level == BudgetLevel.EXCEEDED:
+                cheap = True
         model, base_url, api_key = self._resolve(role, cheap)
         model_obj = self._factory(model, base_url, api_key)
         start = time.perf_counter()
@@ -2475,7 +2608,7 @@ def test_writes_turn_start_event(repo, campaign, mini_module):
     assert "turn_start" in types
 
 def test_paused_when_campaign_cost_cap_reached(repo, campaign, mini_module):
-    repo.record_usage(campaign.id, campaign.active_branch_id, 0, "gm", "qwen-plus", 1, 1, 5.0, 100)
+    repo.record_usage(campaign.id, campaign.active_branch_id, 0, "gm", "qwen3.8-flash", 1, 1, 5.0, 100)
     upd = make_node(repo, mini_module, campaign_cost_cap_usd=1.0)(base_state(campaign))
     assert upd["budget_level"] == "paused" and upd["error"] == "budget_paused"
 ```
@@ -2817,29 +2950,31 @@ git commit -m "feat(graph): resolve_checks, post_turn, fallback nodes"
 **Interfaces:**
 - Consumes: `LLMClient`（Task 11）、`GmDecision/parse_decision_json`（Task 14）、`Module`
 - Produces：
-  - `DECIDE_SYSTEM`（提示词常量）；`build_decide_node(client, module) -> Callable`
-    - 组装上下文：场景名/描述、在场 NPC（名+人设+当前态度）、记忆上下文、玩家行动（开场回合为"（本回合为开场，无玩家行动）"）
+  - `DECIDE_SYSTEM`（提示词常量：7 条规则，限定 actor/npc_id/to_scene 的取值范围）；`build_decide_node(client, module) -> Callable`
+    - 组装上下文：场景名/描述、可去场景、在场 NPC（名+人设+当前态度）、玩家角色（名+技能+属性）、记忆上下文、玩家行动（开场回合为"（本回合为开场，无玩家行动）"）
     - `budget_level == "exceeded"` 时 `cheap=True`（熔断阶梯③：GM 换便宜模型）
+    - LLM 真异常（网络/超时/预算熔断）→ `{"decision_raw": "", "error": "decide_failed", "degraded": {"decide_failed": True}}`（失败不推进）
     - 返回 `{"decision_raw": raw}`
   - `build_validate_node(client) -> Callable`
     - `parse_decision_json` 成功 → `{"decision": decision.model_dump(mode="json"), "error": None}`
-    - 失败 → 把解析错误反馈给模型 repair 重试 **恰好 1 次**；仍失败 → `{"error": "decision_invalid", "decision": None, "degraded": {"decision_invalid": True}}`
+    - 失败 → 携带 `DECIDE_SYSTEM` 系统消息把解析错误反馈给模型 repair 重试 **恰好 1 次**；仍失败 → `{"error": "decision_invalid", "decision": None, "degraded": {"decision_invalid": True}}`
 
 - [ ] **Step 1: 写失败测试**
 
 `backend/tests/graph/test_gm_decide.py`：
 ```python
 from app.config import Pricing, PricingEntry, Settings
-from app.graph.nodes.gm import build_decide_node, build_validate_node
+from app.graph.nodes.gm import DECIDE_SYSTEM, build_decide_node, build_validate_node
 from app.llm.client import LLMClient, LlmContext
 
 CTX_KEYS = ("campaign_id", "branch_id", "turn_id")
 
 def make_client(script):
-    settings = Settings()
+    # gm 用真名；cheap 用虚构名以区分"超限切换"路由（生产两档同名，见 config.py）
+    settings = Settings(gm_model="qwen3.8-flash", cheap_model="alt-cheap-model")
     pricing = Pricing(models={
-        "qwen-plus": PricingEntry(input_per_1k=0.0008, output_per_1k=0.002),
-        "qwen-turbo": PricingEntry(input_per_1k=0.0003, output_per_1k=0.0006),
+        "qwen3.8-flash": PricingEntry(input_per_1k=0.0008, output_per_1k=0.002),
+        "alt-cheap-model": PricingEntry(input_per_1k=0.0003, output_per_1k=0.0006),
     })
     sink_rows = []
     built: dict = {}
@@ -2850,14 +2985,20 @@ def make_client(script):
         return built[model]
 
     class Sink:
-        def record_usage(self, *a, **kw):
-            sink_rows.append(kw)
+        def record_usage(self, campaign_id, branch_id, turn_id, role, model,
+                         tokens_in, tokens_out, cost_usd, latency_ms):
+            sink_rows.append({"campaign_id": campaign_id, "branch_id": branch_id,
+                              "turn_id": turn_id, "role": role, "model": model,
+                              "tokens_in": tokens_in, "tokens_out": tokens_out,
+                              "cost_usd": cost_usd, "latency_ms": latency_ms})
 
     return LLMClient(settings, pricing, usage_sink=Sink(), model_factory=factory), built, sink_rows
 
 def base_state(campaign, **extra):
     return {"campaign_id": campaign.id, "branch_id": campaign.active_branch_id,
             "turn_id": 1, "scene_id": "gate", "npc_attitudes": {"guard": 40},
+            "characters": {"pc_1": {"id": "pc_1", "name": "调查员",
+                                    "skills": {"侦查": 50}, "attributes": {"力量": 60}}},
             "player_inputs": [{"player_id": "p1", "character_id": "pc_1", "text": "我想进城"}],
             "memory_context": "前情摘要：村庄不安宁", "budget_level": "ok", **extra}
 
@@ -2865,13 +3006,15 @@ def test_decide_builds_context_and_returns_raw(campaign, mini_module):
     client, built, _ = make_client(['{"intent_summary": "进城"}'])
     upd = build_decide_node(client, mini_module)(base_state(campaign))
     assert upd["decision_raw"] == '{"intent_summary": "进城"}'
-    prompt = built["qwen-plus"].calls[0][1].content
+    prompt = built["qwen3.8-flash"].calls[0][1].content
     assert "村口" in prompt and "我想进城" in prompt and "王守卫" in prompt and "前情摘要" in prompt
+    assert "pc_1" in prompt and "侦查" in prompt  # 角色 id 与技能表进上下文
+    assert "tavern" in prompt  # 可去场景出口
 
 def test_decide_switches_to_cheap_model_when_exceeded(campaign, mini_module):
     client, built, rows = make_client(['{"intent_summary": "x"}'])
     build_decide_node(client, mini_module)(base_state(campaign, budget_level="exceeded"))
-    assert "qwen-turbo" in built and rows[0]["model"] == "qwen-turbo"
+    assert "alt-cheap-model" in built and rows[0]["model"] == "alt-cheap-model"
 
 def test_validate_parses_fenced_output(campaign):
     client, _, _ = make_client([])
@@ -2885,7 +3028,9 @@ def test_validate_repairs_once_then_succeeds(campaign):
              "campaign_id": "c", "branch_id": "c@main", "turn_id": 1}
     upd = build_validate_node(client)(state)
     assert upd["decision"]["intent_summary"] == "修复后的合法输出"
-    assert len(built["qwen-plus"].calls) == 1
+    assert len(built["qwen3.8-flash"].calls) == 1
+    msgs = built["qwen3.8-flash"].calls[0]
+    assert msgs[0].role == "system" and msgs[0].content == DECIDE_SYSTEM  # repair 随行字段要求
 
 def test_validate_gives_up_after_one_repair(campaign):
     client, built, _ = make_client(["还是不是 JSON"])
@@ -2894,6 +3039,14 @@ def test_validate_gives_up_after_one_repair(campaign):
     upd = build_validate_node(client)(state)
     assert upd["error"] == "decision_invalid" and upd["decision"] is None
     assert upd["degraded"] == {"decision_invalid": True}
+
+def test_decide_llm_error_returns_degraded(campaign, mini_module):
+    """decide 的 LLM 调用抛异常 → 标记 decide_failed 交由 fallback（规格 §8 统一原则）。"""
+    client, _, _ = make_client([])  # 脚本耗尽 → IndexError
+    upd = build_decide_node(client, mini_module)(base_state(campaign))
+    assert upd["error"] == "decide_failed"
+    assert upd["degraded"] == {"decide_failed": True}
+    assert upd["decision_raw"] == ""
 ```
 
 - [ ] **Step 2: 验证失败**
@@ -2913,12 +3066,20 @@ from app.graph.state import GameState
 from app.llm.client import ChatMessage, LLMClient, LlmContext
 
 DECIDE_SYSTEM = (
-    "你是跑团主持人（COC 风格）。基于玩家行动与当前场景做结构化裁决，只输出一个 JSON 对象，字段：\n"
-    'intent_summary(str)、checks(数组，元素 {"actor","skill","difficulty"(regular|hard|extreme)})、'
+    "你是跑团主持人（COC 风格）。基于玩家行动与当前场景做结构化裁决，"
+    "只输出一个 JSON 对象（不要 markdown 代码块、不要任何解释文字），字段：\n"
+    'intent_summary(str，一句话概括玩家意图)、'
+    'checks(数组，元素 {"actor","skill","difficulty"(regular|hard|extreme)})、'
     'proactive_npc_triggers(数组，元素 {"npc_id","trigger"})、'
     'scene_transition(null 或 {"to_scene","reason"})、memory_queries(字符串数组)。\n'
-    "规则：只为玩家的主动行动要求检定，每回合最多 2 个检定；NPC 只能用场景内列出的；"
-    "开场回合可以引入场面但不要要求检定。"
+    "规则：\n"
+    "1. checks[].actor 必须用「玩家角色」列表里的角色 id；skill 从该角色卡的技能或属性名中逐字选取\n"
+    "2. 只为结果不确定、失败有代价的玩家主动行动要求检定（闲聊、开门等必成动作不要检定）；每回合最多 2 个\n"
+    "3. difficulty：普通行动 regular，专业或高风险 hard，近乎极限才用 extreme\n"
+    "4. proactive_npc_triggers 仅当玩家行动直接涉及该 NPC、或场景需要其反应时给出；npc_id 只能用「在场 NPC」中列出的\n"
+    "5. scene_transition 仅当玩家成功移向相邻场景时给出，to_scene 必须从「可去场景」中选，否则填 null\n"
+    "6. memory_queries 为 0~3 个简短检索词，仅在需要回忆前情时给出\n"
+    "7. 开场回合可以引入场面与 NPC，但不要要求检定。"
 )
 
 
@@ -2930,6 +3091,17 @@ def _cheap(state: GameState) -> bool:
     return state.get("budget_level") == "exceeded"
 
 
+def _kv(d: dict | None) -> str:
+    return "、".join(f"{k} {v}" for k, v in (d or {}).items()) or "（无）"
+
+
+def _exit_label(module, scene_id: str) -> str:
+    try:
+        return f"{scene_id}（{module.scene(scene_id).name}）"
+    except KeyError:
+        return scene_id
+
+
 def build_decide_node(client: LLMClient, module) -> Callable[[GameState], dict]:
     def gm_decide(state: GameState) -> dict:
         scene = module.scene(state["scene_id"])
@@ -2937,18 +3109,31 @@ def build_decide_node(client: LLMClient, module) -> Callable[[GameState], dict]:
             f"- {nid}: {module.npc(nid).name}（{module.npc(nid).persona}），当前态度 {state['npc_attitudes'].get(nid, 50)}"
             for nid in scene.npcs
         ) or "（无）"
+        exit_lines = "、".join(_exit_label(module, e) for e in scene.exits) or "（无）"
+        char_lines = "\n".join(
+            f"- {cid}：{c.get('name', '')}；技能 {_kv(c.get('skills'))}；属性 {_kv(c.get('attributes'))}"
+            for cid, c in state.get("characters", {}).items()
+        ) or "（无）"
         inputs_txt = "\n".join(
-            f"- {i['player_id']}: {i['text']}" for i in state.get("player_inputs", [])
+            f"- {i['player_id']}（角色 {i.get('character_id', '?')}）：{i['text']}"
+            for i in state.get("player_inputs", [])
         ) or "（本回合为开场，无玩家行动）"
         user = (
             f"当前场景：{scene.name}\n{scene.description}\n"
+            f"可去场景：{exit_lines}\n"
             f"在场 NPC：\n{npc_lines}\n"
+            f"玩家角色：\n{char_lines}\n"
             f"记忆上下文：\n{state.get('memory_context') or '（无）'}\n"
             f"玩家行动：\n{inputs_txt}"
         )
-        raw = client.chat("gm", [ChatMessage(role="system", content=DECIDE_SYSTEM),
-                                 ChatMessage(role="user", content=user)],
-                          _ctx(state), cheap=_cheap(state))
+        try:
+            raw = client.chat("gm", [ChatMessage(role="system", content=DECIDE_SYSTEM),
+                                     ChatMessage(role="user", content=user)],
+                              _ctx(state), cheap=_cheap(state))
+        except Exception:
+            # LLM 真异常（网络/超时/预算熔断）→ 失败不推进（规格 §8 统一原则）
+            return {"decision_raw": "", "error": "decide_failed",
+                    "degraded": {"decide_failed": True}}
         return {"decision_raw": raw}
 
     return gm_decide
@@ -2960,11 +3145,14 @@ def build_validate_node(client: LLMClient) -> Callable[[GameState], dict]:
         try:
             decision = parse_decision_json(raw)
         except Exception as first_error:
-            repair = [ChatMessage(
-                role="user",
-                content=(f"你上次的输出无法解析（{first_error}）。"
-                         f"请只输出合法 JSON，字段要求不变。上次输出：\n{raw}"),
-            )]
+            repair = [
+                ChatMessage(role="system", content=DECIDE_SYSTEM),
+                ChatMessage(
+                    role="user",
+                    content=(f"你上次的输出无法解析（{first_error}）。"
+                             f"请只输出合法 JSON，字段要求不变。上次输出：\n{raw}"),
+                ),
+            ]
             try:
                 fixed = client.chat("gm", repair, _ctx(state), cheap=_cheap(state))
                 decision = parse_decision_json(fixed)
@@ -3000,7 +3188,7 @@ git commit -m "feat(graph): gm_decide and validate_decision with repair retry"
 - Produces：
   - `NARRATE_SYSTEM`（提示词常量，要求 NPC 台词用 `[[npc:<id>]]...[[/npc]]` 标记）
   - `build_narrate_node(client, module) -> Callable[[GameState], dict]`
-    - 组装：场景（名+描述）、开场素材（`is_opening` 时嵌入 `module.opening.narration`）、玩家行动、检定结果行、NPC 反应行（**过滤沉默占位**：speech 与 action 均为空的不进提示词）
+    - 组装：场景（名+描述）、开场素材（`is_opening` 时嵌入 `module.opening.narration`）、玩家行动（角色名渲染，不泄漏内部 id）、检定结果行（角色名渲染）、NPC 反应行（**过滤沉默占位**：speech 与 action 均为空的不进提示词）
     - 成功（`parse_segments(raw)` 非空）→ `{"narration": raw, "narration_segments": [{"speaker","text"}...], "error": None}`
     - 失败（异常或空输出）→ 反馈后 repair 重试**恰好 1 次**；仍失败 → `{"error": "narrate_failed", "degraded": {"narrate_failed": True}, "narration": "", "narration_segments": []}`（规格 §8：失败不推进）
     - `budget_level == "exceeded"` 时 `cheap=True`（熔断阶梯③）
@@ -3014,16 +3202,18 @@ from app.graph.nodes.gm import build_narrate_node
 from app.llm.client import LLMClient
 
 def make_client(script):
-    settings = Settings()
+    # gm 用真名；cheap 用虚构名以区分"超限切换"路由（生产两档同名，见 config.py）
+    settings = Settings(gm_model="qwen3.8-flash", cheap_model="alt-cheap-model")
     pricing = Pricing(models={
-        "qwen-plus": PricingEntry(input_per_1k=0.0008, output_per_1k=0.002),
-        "qwen-turbo": PricingEntry(input_per_1k=0.0003, output_per_1k=0.0006),
+        "qwen3.8-flash": PricingEntry(input_per_1k=0.0008, output_per_1k=0.002),
+        "alt-cheap-model": PricingEntry(input_per_1k=0.0003, output_per_1k=0.0006),
     })
     built: dict = {}
 
     def factory(model, base_url, api_key):
         from app.llm.fakes import FakeLLM
-        built[model] = FakeLLM(list(script))
+        if model not in built:  # 同一模型复用同一实例，保证多轮调用按剧本推进
+            built[model] = FakeLLM(list(script))
         return built[model]
 
     return LLMClient(settings, pricing, model_factory=factory), built
@@ -3031,6 +3221,8 @@ def make_client(script):
 def base_state(campaign, **extra):
     return {"campaign_id": campaign.id, "branch_id": campaign.active_branch_id,
             "turn_id": 1, "scene_id": "gate", "is_opening": False,
+            "characters": {"pc_1": {"id": "pc_1", "name": "调查员",
+                                    "skills": {"侦查": 50}, "attributes": {"力量": 60}}},
             "player_inputs": [{"player_id": "p1", "character_id": "pc_1", "text": "我想进城"}],
             "check_results": [{"actor": "pc_1", "skill": "侦查", "roll": 73,
                                "skill_value": 50, "level": "fail", "success": False, "seed": 1}],
@@ -3047,16 +3239,17 @@ def test_narrate_returns_ordered_segments(campaign, mini_module):
 def test_prompt_contains_material_and_filters_silent_npc(campaign, mini_module):
     client, built = make_client(["有效叙事。"])
     build_narrate_node(client, mini_module)(base_state(campaign))
-    prompt = built["qwen-plus"].calls[0][1].content
+    prompt = built["qwen3.8-flash"].calls[0][1].content
     assert "村口" in prompt and "侦查" in prompt and "73/50" in prompt
     assert "站住！" in prompt and "王守卫" in prompt
+    assert "调查员" in prompt and "pc_1" not in prompt  # 用角色名，不泄漏内部 id
     assert "barkeep" not in prompt  # 沉默占位被过滤
 
 def test_empty_output_retries_once(campaign, mini_module):
     client, built = make_client(["", "补上的有效叙事。"])
     upd = build_narrate_node(client, mini_module)(base_state(campaign))
     assert upd["narration"] == "补上的有效叙事。" and upd["error"] is None
-    assert len(built["qwen-plus"].calls) == 2
+    assert len(built["qwen3.8-flash"].calls) == 2
 
 def test_gives_up_after_one_repair(campaign, mini_module):
     client, built = make_client(["", "   "])
@@ -3064,18 +3257,18 @@ def test_gives_up_after_one_repair(campaign, mini_module):
     assert upd["error"] == "narrate_failed"
     assert upd["degraded"] == {"narrate_failed": True}
     assert upd["narration"] == "" and upd["narration_segments"] == []
-    assert len(built["qwen-plus"].calls) == 2
+    assert len(built["qwen3.8-flash"].calls) == 2
 
 def test_opening_embeds_opening_narration(campaign, mini_module):
     client, built = make_client(["开场叙事。"])
     build_narrate_node(client, mini_module)(base_state(campaign, is_opening=True, player_inputs=[]))
-    prompt = built["qwen-plus"].calls[0][1].content
+    prompt = built["qwen3.8-flash"].calls[0][1].content
     assert "开场叙述" in prompt  # mini_module.opening.narration
 
 def test_cheap_model_when_exceeded(campaign, mini_module):
     client, built = make_client(["开场叙事。"])
     build_narrate_node(client, mini_module)(base_state(campaign, budget_level="exceeded"))
-    assert "qwen-turbo" in built and "qwen-plus" not in built
+    assert "alt-cheap-model" in built and "qwen3.8-flash" not in built
 ```
 
 - [ ] **Step 2: 验证失败**
@@ -3100,19 +3293,30 @@ from app.llm.client import ChatMessage, LLMClient, LlmContext
 NARRATE_SYSTEM = (
     "你是跑团主持人（COC 风格）。把本回合的结果编排成一段连贯的中文叙事。\n"
     "要求：\n"
-    "1. NPC 的台词必须用标记包裹：[[npc:<npc_id>]]台词内容[[/npc]]，<npc_id> 只能用给定的 id；\n"
-    "2. 标记之外的文字是你的旁白（环境、动作、结果）；\n"
-    "3. 把检定结果自然地写进叙事（成功与失败都要有后果）；\n"
-    "4. 不要输出 JSON、不要解释规则、不要任何元评论。"
+    "1. NPC 的台词必须用标记包裹：[[npc:<npc_id>]]台词内容[[/npc]]，<npc_id> 只能用给定的 id；标记内只写原话，不要写「某某说：」前缀；\n"
+    "2. 标记之外的文字是你的旁白（环境、动作、结果）；NPC 的动作放进旁白描述；\n"
+    "3. 把检定结果转化为故事后果（成功与失败都要有后果）；不要把掷骰数值、id、规则术语写进叙事；\n"
+    "4. NPC 台词与动作以给定的「NPC 反应」为准：可润色使其连贯，不得改变原意，不得编造未提供的台词；\n"
+    "5. 用第二人称（你/你们）叙述，需要区分玩家时用角色名；单回合篇幅 300 字以内，开场可稍长；\n"
+    "6. 不要输出 JSON、markdown 标记、规则解释或任何元评论；可以补充环境细节，但不要新增重要角色、地点或剧情事实。"
 )
+
+
+def _char_name(state: GameState, character_id: str | None) -> str:
+    """叙事用角色名：查不到回退 id（避免内部 id 泄进叙事文本）。"""
+    if character_id:
+        c = state.get("characters", {}).get(character_id)
+        if c and c.get("name"):
+            return c["name"]
+    return character_id or "?"
 
 
 def _check_lines(state: GameState) -> str:
     lines = []
     for c in state.get("check_results", []):
         verdict = "成功" if c.get("success") else "失败"
-        lines.append(f"- {c['actor']} 的「{c['skill']}」：{c['roll']}/{c['skill_value']} "
-                     f"→ {c['level']}（{verdict}）")
+        lines.append(f"- {_char_name(state, c.get('actor'))}的「{c['skill']}」："
+                     f"{c['roll']}/{c['skill_value']} → {c['level']}（{verdict}）")
     return "\n".join(lines) or "（本回合无检定）"
 
 
@@ -3140,7 +3344,8 @@ def build_narrate_node(client: LLMClient, module) -> Callable[[GameState], dict]
     def gm_narrate(state: GameState) -> dict:
         scene = module.scene(state["scene_id"])
         inputs_txt = "\n".join(
-            f"- {i['player_id']}: {i['text']}" for i in state.get("player_inputs", [])
+            f"- {_char_name(state, i.get('character_id') or i.get('player_id'))}：{i['text']}"
+            for i in state.get("player_inputs", [])
         ) or "（开场回合，无玩家行动）"
         opening_line = ""
         if state.get("is_opening"):
@@ -3320,8 +3525,8 @@ class Sink:
 
 
 def test_uses_extractor_role_and_records_usage():
-    settings = Settings(extractor_model="qwen-turbo")
-    pricing = Pricing(models={"qwen-turbo": PricingEntry(input_per_1k=0.1, output_per_1k=0.2)})
+    settings = Settings(extractor_model="qwen3.8-flash")
+    pricing = Pricing(models={"qwen3.8-flash": PricingEntry(input_per_1k=0.1, output_per_1k=0.2)})
     built = {}
 
     def factory(model, base_url, api_key):
@@ -3334,9 +3539,9 @@ def test_uses_extractor_role_and_records_usage():
     result = LLMSummarizer(client)("c1", "c1@main", 7,
                                    [ChatMessage(role="user", content="事件")])
     assert result == "压缩后的摘要"
-    assert "qwen-turbo" in built                        # extractor 路由
-    assert built["qwen-turbo"].calls[0][0].content == "事件"
-    assert sink.rows == [("c1", "c1@main", 7, "extractor", "qwen-turbo")]
+    assert "qwen3.8-flash" in built                        # extractor 路由
+    assert built["qwen3.8-flash"].calls[0][0].content == "事件"
+    assert sink.rows == [("c1", "c1@main", 7, "extractor", "qwen3.8-flash")]
 ```
 
 `backend/tests/storage/test_db_engine.py`：
@@ -3595,13 +3800,13 @@ import copy
 from app.config import Pricing, PricingEntry, Settings
 from app.content.schema import Module
 from app.graph.npc import (assemble_persona, build_npc_dispatch, build_npc_subgraph,
-                           build_npc_worker)
+                           build_npc_worker, _parse_reaction_text)
 from app.llm.client import LLMClient
 
 def make_client(script):
-    settings = Settings()
+    settings = Settings(npc_model="deepseek-flash")
     pricing = Pricing(models={
-        "deepseek-chat": PricingEntry(input_per_1k=0.00027, output_per_1k=0.0011)})
+        "deepseek-flash": PricingEntry(input_per_1k=0.00028, output_per_1k=0.00113)})
     built: dict = {}
 
     def factory(model, base_url, api_key):
@@ -3638,7 +3843,7 @@ def test_subgraph_parses_fenced_reaction():
     client, built = make_client(['```json\n{"speech": "站住！", "action": "伸手拦路"}\n```'])
     final = build_npc_subgraph(client).invoke(task_dict())
     assert final["reaction"] == {"npc_id": "guard", "speech": "站住！", "action": "伸手拦路"}
-    assert "deepseek-chat" in built
+    assert "deepseek-flash" in built
 
 def test_worker_silent_when_parse_fails():
     client, _ = make_client(["这里没有 JSON"])
@@ -3686,6 +3891,11 @@ def test_dispatch_name_mention_fallback(mini_module):
 def test_dispatch_no_candidates_returns_narrate(mini_module):
     d = build_npc_dispatch(mini_module)
     assert d(state_dict(decision={})) == "gm_narrate"
+
+def test_parse_reaction_null_speech_stays_empty():
+    """speech=null 时不能产出字符串 'None'（会混进叙事提示词）。"""
+    r = _parse_reaction_text('{"speech": null, "action": "抱臂而立"}', "guard")
+    assert r["speech"] == "" and r["action"] == "抱臂而立"
 ```
 
 - [ ] **Step 2: 验证失败**
@@ -4031,13 +4241,14 @@ git commit -m "feat(graph): memory_query node with tier-1 downgrade and failure 
 - Test: `backend/tests/graph/test_main_graph.py`
 
 **Interfaces:**
-- Consumes: 全部节点（Task 15-20）、`BudgetGuard`（Task 12）、`SqliteSaver`（langgraph-checkpoint-sqlite）
+- Consumes: 全部节点（Task 15-20）、`BudgetGuard`（Task 12）、`make_repo_budget_probe`（Task 11）、`SqliteSaver`（langgraph-checkpoint-sqlite）
 - Produces：
   - `build_checkpointer(sqlite_path: str) -> SqliteSaver`（建连接 + `setup()`；CLI 断点续玩依赖它）
   - `build_game_graph(repo, module, memory, client, guard, checkpointer=None) -> CompiledGraph`
   - 图结构（路由分支**全部**）：
     - `START → intake`；`intake` →（`error=="budget_paused"` → END **战役熔断**；否则 → `gm_decide`）
-    - `gm_decide → validate`；`validate` →（error → `fallback`；否则 → `resolve_checks`）
+    - `gm_decide` →（`_route_after_decide`：error → `fallback`；否则 → `validate`；节点内已对 LLM 真异常兜底为 `decide_failed`）
+    - `validate` →（error → `fallback`；否则 → `resolve_checks`）
     - `resolve_checks`（`_guarded("resolve_failed", ...)` 包装）→（error → `fallback`；否则 → `apply_transition`）
     - `apply_transition`（应用 `scene_transition`，写入 state 供下游以新场景工作；非相邻目标忽略）→ `memory_query`
     - `memory_query` →（Send 扇出 → `npc_respond`；无候选 → `gm_narrate`）
@@ -4049,14 +4260,16 @@ git commit -m "feat(graph): memory_query node with tier-1 downgrade and failure 
 
 `backend/tests/graph/test_main_graph.py`：
 ```python
+"""主图装配集成测试：开场 / 完整回合（含检定）/ 失败回退 / 场景移动 / 熔断 / NPC 扇出。"""
 import json
 
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import Command
 
 from app.config import Pricing, PricingEntry, Settings
+from app.content.schema import Module
 from app.graph.main import build_game_graph
-from app.llm.client import LLMClient
+from app.llm.client import LLMClient, make_repo_budget_probe
 from app.llm.usage import BudgetGuard
 from app.memory.journal import JournalMemory
 
@@ -4064,12 +4277,15 @@ OPENING_DECIDE = ('{"intent_summary": "开场", "checks": [], "proactive_npc_tri
                   ' "scene_transition": null, "memory_queries": []}')
 OPENING_NARR = "雾气贴着地面爬行。村口的老树在风里摇晃。"
 
-def make_env(repo, mini_module, scripts_by_model, **settings_overrides):
-    settings = Settings(**settings_overrides)
+
+def make_env(repo, mini_module, scripts_by_model, tokens_per_call=(10, 20), **settings_overrides):
+    # 模型名显式对齐脚本队列：gm/cheap → qwen3.8-flash，npc → deepseek-flash
+    defaults = {"gm_model": "qwen3.8-flash", "cheap_model": "qwen3.8-flash",
+                "npc_model": "deepseek-flash", "extractor_model": "qwen3.8-flash"}
+    settings = Settings(**{**defaults, **settings_overrides})
     pricing = Pricing(models={
-        "qwen-plus": PricingEntry(input_per_1k=0.0008, output_per_1k=0.002),
-        "qwen-turbo": PricingEntry(input_per_1k=0.0003, output_per_1k=0.0006),
-        "deepseek-chat": PricingEntry(input_per_1k=0.00027, output_per_1k=0.0011),
+        "qwen3.8-flash": PricingEntry(input_per_1k=0.000113, output_per_1k=0.00038),
+        "deepseek-flash": PricingEntry(input_per_1k=0.00028, output_per_1k=0.00113),
     })
     queues = {m: list(v) for m, v in scripts_by_model.items()}
     model_calls: list[str] = []
@@ -4078,24 +4294,29 @@ def make_env(repo, mini_module, scripts_by_model, **settings_overrides):
         from app.llm.fakes import FakeLLM
         model_calls.append(model)
         items = queues.get(model, [])
-        return FakeLLM([items.pop(0)] if items else [])
+        return FakeLLM([items.pop(0)] if items else [],
+                       tokens_in=tokens_per_call[0], tokens_out=tokens_per_call[1])
 
-    client = LLMClient(settings, pricing, usage_sink=repo, model_factory=factory)
+    client = LLMClient(settings, pricing, usage_sink=repo, model_factory=factory,
+                       budget_probe=make_repo_budget_probe(repo, BudgetGuard(settings)))
     graph = build_game_graph(repo, mini_module, JournalMemory(repo), client,
                              BudgetGuard(settings), MemorySaver())
     return graph, model_calls
+
 
 def config_for(repo, campaign):
     branch = repo.get_branch(campaign.active_branch_id)
     return {"configurable": {"thread_id": repo.thread_id_for(branch)}}
 
+
 def init_state(campaign):
     return {"campaign_id": campaign.id, "branch_id": campaign.active_branch_id,
             "turn_id": 0, "player_inputs": []}
 
+
 def test_opening_turn_reaches_interrupt(repo, campaign, mini_module):
     graph, calls = make_env(repo, mini_module,
-                            {"qwen-plus": [OPENING_DECIDE, OPENING_NARR]})
+                            {"qwen3.8-flash": [OPENING_DECIDE, OPENING_NARR]})
     cfg = config_for(repo, campaign)
     graph.invoke(init_state(campaign), cfg)
     snap = graph.get_state(cfg)
@@ -4104,14 +4325,15 @@ def test_opening_turn_reaches_interrupt(repo, campaign, mini_module):
     assert snap.values["narration_segments"][0]["speaker"] == "gm"
     types = [e.type for e in repo.list_events(campaign.id, campaign.active_branch_id)]
     assert "turn_start" in types and "narration" in types
-    assert calls == ["qwen-plus", "qwen-plus"]   # decide + narrate
+    assert calls == ["qwen3.8-flash", "qwen3.8-flash"]   # decide + narrate
+
 
 def test_resume_runs_full_turn_with_check(repo, campaign, mini_module, monkeypatch):
     monkeypatch.setattr("app.graph.nodes.turn.new_seed", lambda: 42)
     turn1_decide = ('{"intent_summary": "推门", "checks": [{"actor": "pc_1", "skill": "侦查",'
                     ' "difficulty": "regular"}], "proactive_npc_triggers": [],'
                     ' "scene_transition": null, "memory_queries": []}')
-    graph, calls = make_env(repo, mini_module, {"qwen-plus": [
+    graph, calls = make_env(repo, mini_module, {"qwen3.8-flash": [
         OPENING_DECIDE, OPENING_NARR, turn1_decide, "你推开木门，霉味扑面而来。"]})
     cfg = config_for(repo, campaign)
     graph.invoke(init_state(campaign), cfg)
@@ -4130,9 +4352,10 @@ def test_resume_runs_full_turn_with_check(repo, campaign, mini_module, monkeypat
     assert types.count("check") == 1
     assert types.count("narration") == 2
 
+
 def test_validate_failure_falls_back_to_wait(repo, campaign, mini_module):
     graph, calls = make_env(repo, mini_module,
-                            {"qwen-plus": ["这不是 JSON", "还是不是 JSON"]})
+                            {"qwen3.8-flash": ["这不是 JSON", "还是不是 JSON"]})
     cfg = config_for(repo, campaign)
     graph.invoke(init_state(campaign), cfg)
     snap = graph.get_state(cfg)
@@ -4143,11 +4366,12 @@ def test_validate_failure_falls_back_to_wait(repo, campaign, mini_module):
     types = [e.type for e in repo.list_events(campaign.id, campaign.active_branch_id)]
     assert "narration" not in types and "check" not in types
 
+
 def test_scene_transition_moves_player(repo, campaign, mini_module):
     move_decide = ('{"intent_summary": "进酒馆", "checks": [], "proactive_npc_triggers": [],'
                    ' "scene_transition": {"to_scene": "tavern", "reason": "玩家推门"},'
                    ' "memory_queries": []}')
-    graph, calls = make_env(repo, mini_module, {"qwen-plus": [
+    graph, calls = make_env(repo, mini_module, {"qwen3.8-flash": [
         OPENING_DECIDE, OPENING_NARR, move_decide, "你推门走进酒馆，壁炉的热气扑面。"]})
     cfg = config_for(repo, campaign)
     graph.invoke(init_state(campaign), cfg)
@@ -4165,15 +4389,87 @@ def test_scene_transition_moves_player(repo, campaign, mini_module):
 
 
 def test_paused_halts_without_llm(repo, campaign, mini_module):
-    repo.record_usage(campaign.id, campaign.active_branch_id, 0, "gm", "qwen-plus",
-                      1, 1, 5.0, 100)  # 成本超过默认上限 2.0
-    graph, calls = make_env(repo, mini_module, {})
+    repo.record_usage(campaign.id, campaign.active_branch_id, 0, "gm", "qwen3.8-flash",
+                      1, 1, 5.0, 100)  # 成本 5.0 > 显式上限 2.0 → 战役熔断
+    graph, calls = make_env(repo, mini_module, {}, campaign_cost_cap_usd=2.0)
     cfg = config_for(repo, campaign)
     graph.invoke(init_state(campaign), cfg)
     snap = graph.get_state(cfg)
     assert snap.next == ()                           # 图结束（战役熔断，无挂起）
     assert snap.values["error"] == "budget_paused"
     assert calls == []                               # 没有任何 LLM 调用
+
+
+TWIN_MODULE_DICT = {
+    "meta": {"id": "twin", "title": "双人模组"},
+    "opening": {"narration": "开场叙述", "scene_id": "gate"},
+    "scenes": [
+        {"id": "gate", "name": "村口", "npcs": ["guard", "barkeep"], "exits": ["tavern"]},
+        {"id": "tavern", "name": "酒馆", "npcs": [], "exits": []},
+    ],
+    "npcs": [
+        {"id": "guard", "name": "王守卫", "persona": "多疑的老兵", "initial_attitude": 40},
+        {"id": "barkeep", "name": "刘老板", "persona": "健谈的酒馆老板", "initial_attitude": 60},
+    ],
+    "clues": [],
+    "endings": [{"id": "e1", "scene": "tavern", "condition": "揭开真相"}],
+}
+FANOUT_DECIDE = ('{"intent_summary": "打量四周", "checks": [],'
+                 ' "proactive_npc_triggers": [{"npc_id": "guard", "trigger": "玩家东张西望"},'
+                 ' {"npc_id": "barkeep", "trigger": "玩家环顾四周"}],'
+                 ' "scene_transition": null, "memory_queries": []}')
+GUARD_REPLY = '{"speech": "别乱走，这里不太平。", "action": "把手按在枪套上"}'
+BARKEEP_REPLY = '{"speech": "要来一杯吗？", "action": "擦着杯子"}'
+
+
+def test_npc_fanout_merges_reactions(repo, campaign):
+    """两名在场 NPC 同时被触发：Send 并行执行 → 反应合并回主图 → 汇合 narrate 收尾。"""
+    twin = Module.model_validate(TWIN_MODULE_DICT)
+    graph, calls = make_env(repo, twin, {
+        "qwen3.8-flash": [OPENING_DECIDE, OPENING_NARR, FANOUT_DECIDE,
+                          "王守卫的手按在枪套上，刘老板擦着杯子看了你们一眼。"],
+        "deepseek-flash": [GUARD_REPLY, BARKEEP_REPLY],
+    })
+    cfg = config_for(repo, campaign)
+    graph.invoke(init_state(campaign), cfg)
+    graph.invoke(Command(resume={
+        "turn_id": 1,
+        "inputs": [{"player_id": "p1", "character_id": "pc_1", "text": "我环顾四周"}],
+        "skipped": [],
+    }), cfg)
+    snap = graph.get_state(cfg)
+    assert snap.next == ("wait_input",)
+    assert set(snap.values["npc_reactions"].keys()) == {"guard", "barkeep"}
+    assert all(r["speech"] for r in snap.values["npc_reactions"].values())
+    assert calls.count("deepseek-flash") == 2        # 两名 NPC 各一次，Send 并行
+
+
+def test_decide_llm_error_falls_back_to_wait(repo, campaign, mini_module):
+    """decide 的 LLM 调用抛异常（网络/超时/预算熔断）→ 失败不推进，回到输入等待。"""
+    graph, calls = make_env(repo, mini_module, {})   # 空脚本：decide 调用即 IndexError
+    cfg = config_for(repo, campaign)
+    graph.invoke(init_state(campaign), cfg)
+    snap = graph.get_state(cfg)
+    assert snap.next == ("wait_input",)
+    assert snap.values["error"] == "decide_failed"
+    assert snap.values["turn_id"] == 0
+
+
+def test_turn_over_cap_downgrades_followup_calls(repo, campaign, mini_module):
+    """检查点②：回合内首次调用后即超 turn cap → 后续 GM 调用自动切 cheap；
+    回合开始的采样读数仍为 0（ok）——证明回合内探针独立生效。"""
+    graph, calls = make_env(repo, mini_module,
+                            {"qwen3.8-flash": [OPENING_DECIDE],
+                             "alt-cheap-model": [OPENING_NARR]},
+                            tokens_per_call=(1000, 1000),
+                            turn_token_cap=2000, cheap_model="alt-cheap-model")
+    cfg = config_for(repo, campaign)
+    graph.invoke(init_state(campaign), cfg)
+    snap = graph.get_state(cfg)
+    assert snap.next == ("wait_input",)
+    assert calls == ["qwen3.8-flash", "alt-cheap-model"]   # 第二次调用被探针降级
+    starts = repo.list_events(campaign.id, campaign.active_branch_id, types=["turn_start"])
+    assert json.loads(starts[0].payload_json)["budget_level"] == "ok"  # 回合开始读数为 0
 ```
 
 - [ ] **Step 2: 验证失败**
@@ -4230,6 +4526,10 @@ def _route_after_intake(state: GameState) -> str:
     return "halt" if state.get("error") == "budget_paused" else "gm_decide"
 
 
+def _route_after_decide(state: GameState) -> str:
+    return "fallback" if state.get("error") else "validate"
+
+
 def _route_after_validate(state: GameState) -> str:
     return "fallback" if state.get("error") else "resolve_checks"
 
@@ -4260,7 +4560,8 @@ def build_game_graph(repo, module, memory, client, guard, checkpointer=None):
     g.add_edge(START, "intake")
     g.add_conditional_edges("intake", _route_after_intake,
                             {"halt": END, "gm_decide": "gm_decide"})
-    g.add_edge("gm_decide", "validate")
+    g.add_conditional_edges("gm_decide", _route_after_decide,
+                            {"fallback": "fallback", "validate": "validate"})
     g.add_conditional_edges("validate", _route_after_validate,
                             {"fallback": "fallback", "resolve_checks": "resolve_checks"})
     g.add_conditional_edges("resolve_checks", _route_after_resolve,
@@ -4300,7 +4601,7 @@ git commit -m "feat(graph): main graph assembly with checkpointing and full-turn
 - Consumes: `build_game_graph`（Task 21）、`SpyMemory` 模式、全套节点
 - Produces: 覆盖规格 §8 降级矩阵与 §9 熔断阶梯 ①②③ 的图级用例（④ 由 Task 21 的 `test_paused_halts_without_llm` 覆盖、validate repair 失败由 `test_validate_failure_falls_back_to_wait` 覆盖、NPC 沉默单元级由 Task 19 覆盖，此处补图级）
 
-- [ ] **Step 1: 写测试（复用 Task 21 的 make_env 结构，增加 memory 参数）**
+- [ ] **Step 1: 写测试（复用 Task 21 的 make_env 结构，增加 memory / tokens_per_call 参数）**
 
 `backend/tests/graph/test_degradation_paths.py`：
 ```python
@@ -4309,7 +4610,7 @@ from langgraph.types import Command
 
 from app.config import Pricing, PricingEntry, Settings
 from app.graph.main import build_game_graph
-from app.llm.client import LLMClient
+from app.llm.client import LLMClient, make_repo_budget_probe
 from app.llm.usage import BudgetGuard
 from app.memory.journal import JournalMemory
 
@@ -4338,12 +4639,15 @@ class SpyMemory:
     def update_summaries(self, campaign_id, branch_id, turn_id):
         self.inner.update_summaries(campaign_id, branch_id, turn_id)
 
-def make_env(repo, mini_module, scripts_by_model, memory=None, **settings_overrides):
-    settings = Settings(**settings_overrides)
+def make_env(repo, mini_module, scripts_by_model, memory=None, tokens_per_call=(10, 20),
+             **settings_overrides):
+    # 模型名显式对齐脚本队列：gm/cheap → qwen3.8-flash，npc → deepseek-flash
+    defaults = {"gm_model": "qwen3.8-flash", "cheap_model": "qwen3.8-flash",
+                "npc_model": "deepseek-flash", "extractor_model": "qwen3.8-flash"}
+    settings = Settings(**{**defaults, **settings_overrides})
     pricing = Pricing(models={
-        "qwen-plus": PricingEntry(input_per_1k=0.0008, output_per_1k=0.002),
-        "qwen-turbo": PricingEntry(input_per_1k=0.0003, output_per_1k=0.0006),
-        "deepseek-chat": PricingEntry(input_per_1k=0.00027, output_per_1k=0.0011),
+        "qwen3.8-flash": PricingEntry(input_per_1k=0.000113, output_per_1k=0.00038),
+        "deepseek-flash": PricingEntry(input_per_1k=0.00028, output_per_1k=0.00113),
     })
     queues = {m: list(v) for m, v in scripts_by_model.items()}
     model_calls: list[str] = []
@@ -4352,9 +4656,11 @@ def make_env(repo, mini_module, scripts_by_model, memory=None, **settings_overri
         from app.llm.fakes import FakeLLM
         model_calls.append(model)
         items = queues.get(model, [])
-        return FakeLLM([items.pop(0)] if items else [])
+        return FakeLLM([items.pop(0)] if items else [],
+                       tokens_in=tokens_per_call[0], tokens_out=tokens_per_call[1])
 
-    client = LLMClient(settings, pricing, usage_sink=repo, model_factory=factory)
+    client = LLMClient(settings, pricing, usage_sink=repo, model_factory=factory,
+                       budget_probe=make_repo_budget_probe(repo, BudgetGuard(settings)))
     graph = build_game_graph(repo, mini_module, memory or JournalMemory(repo), client,
                              BudgetGuard(settings), MemorySaver())
     return graph, model_calls
@@ -4368,16 +4674,16 @@ def init_state(campaign):
             "turn_id": 0, "player_inputs": []}
 
 def test_tight_downgrades_memory_and_shrinks_npc(repo, campaign, mini_module):
-    repo.record_usage(campaign.id, campaign.active_branch_id, 0, "gm", "qwen-plus",
+    repo.record_usage(campaign.id, campaign.active_branch_id, 0, "gm", "qwen3.8-flash",
                       10, 20, 0.8, 100)  # cap=1.0 → 0.8 ∈ [0.7, 1.0) → TIGHT
     tight_decide = ('{"intent_summary": "接近", "checks": [], "proactive_npc_triggers":'
                     ' [{"npc_id": "guard", "trigger": "玩家靠近"}, {"npc_id": "barkeep"}],'
                     ' "scene_transition": null, "memory_queries": ["磨坊"]}')
     spy = SpyMemory(JournalMemory(repo))
     graph, calls = make_env(repo, mini_module, {
-        "qwen-plus": [OPENING_DECIDE, OPENING_NARR, tight_decide, "守卫的目光钉在你身上。"],
-        "deepseek-chat": ['{"speech": "站住。", "action": "伸手拦路"}'],
-    }, memory=spy, campaign_cost_cap_usd=1.0)
+        "qwen3.8-flash": [OPENING_DECIDE, OPENING_NARR, tight_decide, "守卫的目光钉在你身上。"],
+        "deepseek-flash": ['{"speech": "站住。", "action": "伸手拦路"}'],
+    }, memory=spy, campaign_cost_cap_usd=1.0, cheap_model="alt-cheap-model")
     cfg = config_for(repo, campaign)
     graph.invoke(init_state(campaign), cfg)
     graph.invoke(RESUME_TURN1, cfg)
@@ -4385,25 +4691,25 @@ def test_tight_downgrades_memory_and_shrinks_npc(repo, campaign, mini_module):
     assert snap.next == ("wait_input",)
     assert spy.context_budgets == [600, 600]      # 阶梯①：记忆降档（开场 + 第 1 回合）
     assert spy.search_queries == []               # 降档后不做检索
-    assert calls.count("deepseek-chat") == 1      # 阶梯②：两个 trigger 收缩到首位
-    assert "qwen-turbo" not in calls              # TIGHT 尚未到 ③
+    assert calls.count("deepseek-flash") == 1     # 阶梯②：两个 trigger 收缩到首位
+    assert "alt-cheap-model" not in calls         # TIGHT 尚未到 ③（cheap 用虚构名可观测）
 
 def test_exceeded_switches_gm_to_cheap_model(repo, campaign, mini_module):
-    repo.record_usage(campaign.id, campaign.active_branch_id, 1, "gm", "qwen-plus",
+    repo.record_usage(campaign.id, campaign.active_branch_id, 1, "gm", "qwen3.8-flash",
                       20000, 15000, 0.1, 100)  # 第 1 回合 35000 tokens ≥ 30000 → EXCEEDED
     spy = SpyMemory(JournalMemory(repo))
     graph, calls = make_env(repo, mini_module, {
-        "qwen-plus": [OPENING_DECIDE, OPENING_NARR],
-        "qwen-turbo": [PLAIN_DECIDE, "风穿过空荡的街道。"],
-    }, memory=spy)
+        "qwen3.8-flash": [OPENING_DECIDE, OPENING_NARR],
+        "alt-cheap-model": [PLAIN_DECIDE, "风穿过空荡的街道。"],
+    }, memory=spy, cheap_model="alt-cheap-model")
     cfg = config_for(repo, campaign)
     graph.invoke(init_state(campaign), cfg)
     calls.clear()  # 只看第 1 回合的模型选择
     graph.invoke(RESUME_TURN1, cfg)
     snap = graph.get_state(cfg)
     assert snap.next == ("wait_input",) and snap.values["turn_id"] == 2
-    assert "qwen-plus" not in calls               # 阶梯③：GM（decide+narrate）全换便宜档
-    assert calls.count("qwen-turbo") == 2
+    assert "qwen3.8-flash" not in calls           # 阶梯③：GM（decide+narrate）全换便宜档
+    assert calls.count("alt-cheap-model") == 2    # cheap 用虚构名以验证切换（生产两档同名）
     assert spy.context_budgets == [600]           # 阶梯①同样生效（逐级累积）
 
 def test_resolve_failure_falls_back(repo, campaign, mini_module, monkeypatch):
@@ -4415,7 +4721,7 @@ def test_resolve_failure_falls_back(repo, campaign, mini_module, monkeypatch):
                     ' "proactive_npc_triggers": [], "scene_transition": null,'
                     ' "memory_queries": []}')
     graph, calls = make_env(repo, mini_module,
-                            {"qwen-plus": [OPENING_DECIDE, OPENING_NARR, check_decide]})
+                            {"qwen3.8-flash": [OPENING_DECIDE, OPENING_NARR, check_decide]})
     cfg = config_for(repo, campaign)
     graph.invoke(init_state(campaign), cfg)
     graph.invoke(RESUME_TURN1, cfg)
@@ -4439,7 +4745,7 @@ class BrokenGetContextMemory:
 
 def test_memory_failure_continues_turn(repo, campaign, mini_module):
     graph, calls = make_env(repo, mini_module, {
-        "qwen-plus": [OPENING_DECIDE, OPENING_NARR, PLAIN_DECIDE, "你环顾四周，一切如常。"],
+        "qwen3.8-flash": [OPENING_DECIDE, OPENING_NARR, PLAIN_DECIDE, "你环顾四周，一切如常。"],
     }, memory=BrokenGetContextMemory())
     cfg = config_for(repo, campaign)
     graph.invoke(init_state(campaign), cfg)
@@ -4457,8 +4763,8 @@ def test_silent_npc_still_narrates(repo, campaign, mini_module):
                       ' "trigger": "玩家试图进城"}], "scene_transition": null,'
                       ' "memory_queries": []}')
     graph, calls = make_env(repo, mini_module, {
-        "qwen-plus": [OPENING_DECIDE, OPENING_NARR, trigger_decide, "守卫只是沉默地看着你。"],
-        "deepseek-chat": [],   # 脚本耗尽 → NPC 调用抛异常 → 静默占位
+        "qwen3.8-flash": [OPENING_DECIDE, OPENING_NARR, trigger_decide, "守卫只是沉默地看着你。"],
+        "deepseek-flash": [],   # 脚本耗尽 → NPC 调用抛异常 → 静默占位
     })
     cfg = config_for(repo, campaign)
     graph.invoke(init_state(campaign), cfg)
@@ -4473,7 +4779,7 @@ def test_silent_npc_still_narrates(repo, campaign, mini_module):
 - [ ] **Step 2: 运行测试**
 
 Run: `cd backend; uv run pytest tests/graph/test_degradation_paths.py -q`
-Expected: PASS（6 passed）
+Expected: PASS（5 passed）
 
 - [ ] **Step 3: 全量回归**
 
@@ -4517,7 +4823,7 @@ git commit -m "test(graph): budget ladder and degradation path coverage"
 """录制回放：默认零网络零 key；--record 时用真实模型重录基线。
 
 fixture 格式（tests/fixtures/{module}/{scenario}/turn_{n}.json）：
-{"responses": [{"model": "qwen-plus", "text": "..."}, ...],  # 按请求时间顺序
+{"responses": [{"model": "qwen3.8-flash", "text": "..."}, ...],  # 按请求时间顺序
  "seeds": [123, ...]}                                         # 本回合骰子 seed（可选）
 """
 import json
@@ -4595,7 +4901,8 @@ def build_recording_client(settings, pricing, usage_sink=None, real_factory=None
     inner_factory = real_factory or (
         lambda model, base_url, api_key: OpenAICompatModel(
             api_key=api_key, base_url=base_url, model=model,
-            timeout_seconds=settings.request_timeout_seconds))
+            timeout_seconds=settings.request_timeout_seconds,
+            enable_thinking=settings.enable_thinking))
     client = LLMClient(settings, pricing, usage_sink=usage_sink,
                        model_factory=make_recording_factory(inner_factory, collected))
     return client, collected
@@ -4724,9 +5031,9 @@ endings:
 ```json
 {
   "responses": [
-    {"model": "qwen-plus", "text": "{\"intent_summary\": \"开场：玩家抵达镇口\", \"checks\": [], \"proactive_npc_triggers\": [{\"npc_id\": \"elder\", \"trigger\": \"长老在广场等着来客\"}], \"scene_transition\": null, \"memory_queries\": []}"},
-    {"model": "deepseek-chat", "text": "{\"speech\": \"你们就是信里说的外乡人？近来镇上……不太平。\", \"action\": \"拄着拐杖从神像旁踱出来\"}"},
-    {"model": "qwen-plus", "text": "暮色把雾霭镇压得很低。广场中央的神像没有脸，只有一片被磨平的石面。[[npc:elder]]你们就是信里说的外乡人？近来镇上……不太平。[[/npc]]老人的目光在你们脸上停了很久。"}
+    {"model": "qwen3.8-flash", "text": "{\"intent_summary\": \"开场：玩家抵达镇口\", \"checks\": [], \"proactive_npc_triggers\": [{\"npc_id\": \"elder\", \"trigger\": \"长老在广场等着来客\"}], \"scene_transition\": null, \"memory_queries\": []}"},
+    {"model": "deepseek-flash", "text": "{\"speech\": \"你们就是信里说的外乡人？近来镇上……不太平。\", \"action\": \"拄着拐杖从神像旁踱出来\"}"},
+    {"model": "qwen3.8-flash", "text": "暮色把雾霭镇压得很低。广场中央的神像没有脸，只有一片被磨平的石面。[[npc:elder]]你们就是信里说的外乡人？近来镇上……不太平。[[/npc]]老人的目光在你们脸上停了很久。"}
   ],
   "seeds": []
 }
@@ -4736,9 +5043,9 @@ endings:
 ```json
 {
   "responses": [
-    {"model": "qwen-plus", "text": "{\"intent_summary\": \"向陈长老打听失踪的学徒\", \"checks\": [{\"actor\": \"pc_p1\", \"skill\": \"话术\", \"difficulty\": \"regular\"}], \"proactive_npc_triggers\": [{\"npc_id\": \"elder\", \"trigger\": \"玩家当面问起失踪案\"}], \"scene_transition\": null, \"memory_queries\": [\"学徒失踪\"]}"},
-    {"model": "deepseek-chat", "text": "{\"speech\": \"三个月了……老赵的学徒进了地窖，再没出来。你们要查，就去旅店找何老板拿日记。\", \"action\": \"压低声音，目光扫向磨坊方向\"}"},
-    {"model": "qwen-plus", "text": "长老的声音在雾气里发颤。[[npc:elder]]三个月了……老赵的学徒进了地窖，再没出来。[[/npc]]他顿了顿，抬手指向街角还亮着灯的白鹭旅店。"}
+    {"model": "qwen3.8-flash", "text": "{\"intent_summary\": \"向陈长老打听失踪的学徒\", \"checks\": [{\"actor\": \"pc_p1\", \"skill\": \"话术\", \"difficulty\": \"regular\"}], \"proactive_npc_triggers\": [{\"npc_id\": \"elder\", \"trigger\": \"玩家当面问起失踪案\"}], \"scene_transition\": null, \"memory_queries\": [\"学徒失踪\"]}"},
+    {"model": "deepseek-flash", "text": "{\"speech\": \"三个月了……老赵的学徒进了地窖，再没出来。你们要查，就去旅店找何老板拿日记。\", \"action\": \"压低声音，目光扫向磨坊方向\"}"},
+    {"model": "qwen3.8-flash", "text": "长老的声音在雾气里发颤。[[npc:elder]]三个月了……老赵的学徒进了地窖，再没出来。[[/npc]]他顿了顿，抬手指向街角还亮着灯的白鹭旅店。"}
   ],
   "seeds": [20260924]
 }
@@ -4821,7 +5128,7 @@ def test_smoke_replay_offline(repo, monkeypatch):
     types = [e.type for e in repo.list_events(campaign.id, campaign.active_branch_id)]
     assert types.count("narration") == 2 and types.count("check") == 1
     assert replay.index == 6          # 全部录制响应按序精确消耗
-    assert replay.calls[1]["model"] == "deepseek-chat"
+    assert replay.calls[1]["model"] == "deepseek-flash"
 
 def test_record_mode_writes_new_baseline(repo, monkeypatch, record_mode):
     """--record：真实调用并把新基线写回 fixtures（需 DASHSCOPE/DEEPSEEK key）。"""
@@ -4868,10 +5175,10 @@ git commit -m "feat(test): record/replay harness with misty hollow baseline fixt
 - Test: `backend/tests/test_cli.py`
 
 **Interfaces:**
-- Consumes: `assemble` 链路（Task 1-23 全部）、`build_checkpointer`/`build_game_graph`（Task 21）
+- Consumes: `assemble` 链路（Task 1-23 全部）、`build_checkpointer`/`build_game_graph`（Task 21）、`make_repo_budget_probe`（Task 11）
 - Produces：
   - `AppContext`（dataclass：`settings, repo, module, client, guard, memory, graph, queue`）
-  - `assemble(settings, module_path) -> AppContext`（同一 sqlite 文件承载 L2 + 检查点；`repo` 直接作为 usage_sink，签名已对齐）
+  - `assemble(settings, module_path) -> AppContext`（同一 sqlite 文件承载 L2 + 检查点；`repo` 直接作为 usage_sink，签名已对齐；`LLMClient` 已接检查点②探针）
   - **异步摘要接线（Task 18b）**：`JournalMemory(repo, summarizer=LLMSummarizer(client))` + `BackgroundQueue(name="summary")` + `BackgroundSummaries` 包装进 `build_game_graph`；`main` 退出前 `queue.flush(2.0)`
   - `render_narration(segments, module) -> list[str]`（`gm` → 原文；`npc:<id>` → `【NPC 名】台词`）
   - `play_loop(graph, config, module, turn_id, input_fn, print_fn) -> str`（`"quit"` / `"paused"`；退出语：`quit/exit/q/退出`）
@@ -4889,7 +5196,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from app.cli import AppContext, play_loop, render_narration, run_play
 from app.config import Pricing, PricingEntry, Settings
 from app.graph.main import build_checkpointer, build_game_graph
-from app.llm.client import LLMClient
+from app.llm.client import LLMClient, make_repo_budget_probe
 from app.llm.usage import BudgetGuard
 from app.memory.journal import JournalMemory
 from app.rules.character import make_default_character
@@ -4902,9 +5209,8 @@ PLAIN_DECIDE = ('{"intent_summary": "继续", "checks": [], "proactive_npc_trigg
 
 def make_pricing():
     return Pricing(models={
-        "qwen-plus": PricingEntry(input_per_1k=0.0008, output_per_1k=0.002),
-        "qwen-turbo": PricingEntry(input_per_1k=0.0003, output_per_1k=0.0006),
-        "deepseek-chat": PricingEntry(input_per_1k=0.00027, output_per_1k=0.0011)})
+        "qwen3.8-flash": PricingEntry(input_per_1k=0.000113, output_per_1k=0.00038),
+        "deepseek-flash": PricingEntry(input_per_1k=0.00028, output_per_1k=0.00113)})
 
 def make_env(repo, mini_module, scripts_by_model, checkpointer=None, settings=None):
     settings = settings or Settings()
@@ -4917,7 +5223,8 @@ def make_env(repo, mini_module, scripts_by_model, checkpointer=None, settings=No
         items = queues.get(model, [])
         return FakeLLM([items.pop(0)] if items else [])
 
-    client = LLMClient(settings, make_pricing(), usage_sink=repo, model_factory=factory)
+    client = LLMClient(settings, make_pricing(), usage_sink=repo, model_factory=factory,
+                       budget_probe=make_repo_budget_probe(repo, BudgetGuard(settings)))
     graph = build_game_graph(repo, mini_module, JournalMemory(repo), client,
                              BudgetGuard(settings), checkpointer or MemorySaver())
     return graph, model_calls
@@ -4932,7 +5239,7 @@ def test_render_narration_marks_speakers(mini_module):
     assert render_narration(segments, mini_module) == ["风起了。", "【王守卫】站住！"]
 
 def test_play_loop_runs_turn_then_quits(repo, campaign, mini_module):
-    graph, calls = make_env(repo, mini_module, {"qwen-plus": [
+    graph, calls = make_env(repo, mini_module, {"qwen3.8-flash": [
         OPENING_DECIDE, OPENING_NARR, PLAIN_DECIDE, "你推门进去，灯影摇晃。"]})
     cfg = config_for(repo, campaign)
     graph.invoke({"campaign_id": campaign.id, "branch_id": campaign.active_branch_id,
@@ -4947,9 +5254,10 @@ def test_play_loop_runs_turn_then_quits(repo, campaign, mini_module):
     assert graph.get_state(cfg).values["turn_id"] == 2
 
 def test_run_play_reports_paused(repo, campaign, mini_module):
-    repo.record_usage(campaign.id, campaign.active_branch_id, 0, "gm", "qwen-plus",
-                      1, 1, 5.0, 100)                     # 超过默认成本上限 2.0
-    graph, calls = make_env(repo, mini_module, {})        # 不应发生任何 LLM 调用
+    repo.record_usage(campaign.id, campaign.active_branch_id, 0, "gm", "qwen3.8-flash",
+                      1, 1, 5.0, 100)                     # 成本 5.0 > 显式上限 2.0 → 战役熔断
+    graph, calls = make_env(repo, mini_module, {},
+                            settings=Settings(campaign_cost_cap_usd=2.0))        # 不应发生任何 LLM 调用
     lines: list[str] = []
     ctx = AppContext(settings=Settings(), repo=repo, module=mini_module, client=None,
                      guard=None, memory=None, graph=graph)
@@ -4965,7 +5273,7 @@ def test_resume_after_process_restart(tmp_path, mini_module):
 
     db = str(tmp_path / "ensemble.db")
     settings = Settings(sqlite_path=db)
-    scripts = {"qwen-plus": [OPENING_DECIDE, OPENING_NARR, PLAIN_DECIDE,
+    scripts = {"qwen3.8-flash": [OPENING_DECIDE, OPENING_NARR, PLAIN_DECIDE,
                              "灯影摇晃，走廊尽头传来脚步声。"]}
     queues = {m: list(v) for m, v in scripts.items()}
 
@@ -4981,7 +5289,8 @@ def test_resume_after_process_restart(tmp_path, mini_module):
     campaign = repo1.create_campaign(mini_module.meta.id, "续玩测试")
     char = make_default_character("p1", "调查员")
     repo1.append_character(campaign.id, campaign.active_branch_id, 0, char.id, asdict(char))
-    client1 = LLMClient(settings, make_pricing(), usage_sink=repo1, model_factory=factory)
+    client1 = LLMClient(settings, make_pricing(), usage_sink=repo1, model_factory=factory,
+                        budget_probe=make_repo_budget_probe(repo1, BudgetGuard(settings)))
     graph1 = build_game_graph(repo1, mini_module, JournalMemory(repo1), client1,
                               BudgetGuard(settings), build_checkpointer(db))
     cfg = {"configurable": {
@@ -4994,7 +5303,8 @@ def test_resume_after_process_restart(tmp_path, mini_module):
     engine2 = make_engine(db)
     init_db(engine2)
     repo2 = SqliteRepository(engine2)
-    client2 = LLMClient(settings, make_pricing(), usage_sink=repo2, model_factory=factory)
+    client2 = LLMClient(settings, make_pricing(), usage_sink=repo2, model_factory=factory,
+                        budget_probe=make_repo_budget_probe(repo2, BudgetGuard(settings)))
     graph2 = build_game_graph(repo2, mini_module, JournalMemory(repo2), client2,
                               BudgetGuard(settings), build_checkpointer(db))
     snap = graph2.get_state(cfg)
@@ -5029,7 +5339,7 @@ from langgraph.types import Command
 from app.config import Settings, load_pricing, load_settings
 from app.content.loader import load_module
 from app.graph.main import build_checkpointer, build_game_graph
-from app.llm.client import LLMClient
+from app.llm.client import LLMClient, make_repo_budget_probe
 from app.llm.usage import BudgetGuard
 from app.memory.journal import JournalMemory
 from app.memory.scheduler import BackgroundSummaries
@@ -5065,8 +5375,9 @@ def assemble(settings: Settings, module_path: str | Path) -> AppContext:
     init_db(repo.engine)
     module = load_module(module_path)
     pricing = load_pricing(settings.pricing_path)
-    client = LLMClient(settings, pricing, usage_sink=repo)
     guard = BudgetGuard(settings)
+    client = LLMClient(settings, pricing, usage_sink=repo,
+                       budget_probe=make_repo_budget_probe(repo, guard))
     memory = JournalMemory(repo, summarizer=LLMSummarizer(client))
     queue = BackgroundQueue(lambda key, payload: memory.update_summaries(*payload),
                             name="summary")
