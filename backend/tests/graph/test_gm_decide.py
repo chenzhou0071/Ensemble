@@ -5,10 +5,11 @@ from app.llm.client import LLMClient, LlmContext
 CTX_KEYS = ("campaign_id", "branch_id", "turn_id")
 
 def make_client(script):
-    settings = Settings(gm_model="qwen-plus", cheap_model="qwen-turbo")
+    # gm 用真名；cheap 用虚构名以区分"超限切换"路由（生产两档同名，见 config.py）
+    settings = Settings(gm_model="qwen3.8-flash", cheap_model="alt-cheap-model")
     pricing = Pricing(models={
-        "qwen-plus": PricingEntry(input_per_1k=0.0008, output_per_1k=0.002),
-        "qwen-turbo": PricingEntry(input_per_1k=0.0003, output_per_1k=0.0006),
+        "qwen3.8-flash": PricingEntry(input_per_1k=0.0008, output_per_1k=0.002),
+        "alt-cheap-model": PricingEntry(input_per_1k=0.0003, output_per_1k=0.0006),
     })
     sink_rows = []
     built: dict = {}
@@ -40,7 +41,7 @@ def test_decide_builds_context_and_returns_raw(campaign, mini_module):
     client, built, _ = make_client(['{"intent_summary": "进城"}'])
     upd = build_decide_node(client, mini_module)(base_state(campaign))
     assert upd["decision_raw"] == '{"intent_summary": "进城"}'
-    prompt = built["qwen-plus"].calls[0][1].content
+    prompt = built["qwen3.8-flash"].calls[0][1].content
     assert "村口" in prompt and "我想进城" in prompt and "王守卫" in prompt and "前情摘要" in prompt
     assert "pc_1" in prompt and "侦查" in prompt  # 角色 id 与技能表进上下文
     assert "tavern" in prompt  # 可去场景出口
@@ -48,7 +49,7 @@ def test_decide_builds_context_and_returns_raw(campaign, mini_module):
 def test_decide_switches_to_cheap_model_when_exceeded(campaign, mini_module):
     client, built, rows = make_client(['{"intent_summary": "x"}'])
     build_decide_node(client, mini_module)(base_state(campaign, budget_level="exceeded"))
-    assert "qwen-turbo" in built and rows[0]["model"] == "qwen-turbo"
+    assert "alt-cheap-model" in built and rows[0]["model"] == "alt-cheap-model"
 
 def test_validate_parses_fenced_output(campaign):
     client, _, _ = make_client([])
@@ -62,8 +63,8 @@ def test_validate_repairs_once_then_succeeds(campaign):
              "campaign_id": "c", "branch_id": "c@main", "turn_id": 1}
     upd = build_validate_node(client)(state)
     assert upd["decision"]["intent_summary"] == "修复后的合法输出"
-    assert len(built["qwen-plus"].calls) == 1
-    msgs = built["qwen-plus"].calls[0]
+    assert len(built["qwen3.8-flash"].calls) == 1
+    msgs = built["qwen3.8-flash"].calls[0]
     assert msgs[0].role == "system" and msgs[0].content == DECIDE_SYSTEM  # repair 随行字段要求
 
 def test_validate_gives_up_after_one_repair(campaign):
@@ -73,3 +74,11 @@ def test_validate_gives_up_after_one_repair(campaign):
     upd = build_validate_node(client)(state)
     assert upd["error"] == "decision_invalid" and upd["decision"] is None
     assert upd["degraded"] == {"decision_invalid": True}
+
+def test_decide_llm_error_returns_degraded(campaign, mini_module):
+    """decide 的 LLM 调用抛异常 → 标记 decide_failed 交由 fallback（规格 §8 统一原则）。"""
+    client, _, _ = make_client([])  # 脚本耗尽 → IndexError
+    upd = build_decide_node(client, mini_module)(base_state(campaign))
+    assert upd["error"] == "decide_failed"
+    assert upd["degraded"] == {"decide_failed": True}
+    assert upd["decision_raw"] == ""

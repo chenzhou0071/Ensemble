@@ -29,6 +29,6 @@ def test_writes_turn_start_event(repo, campaign, mini_module):
     assert "turn_start" in types
 
 def test_paused_when_campaign_cost_cap_reached(repo, campaign, mini_module):
-    repo.record_usage(campaign.id, campaign.active_branch_id, 0, "gm", "qwen-plus", 1, 1, 5.0, 100)
+    repo.record_usage(campaign.id, campaign.active_branch_id, 0, "gm", "qwen3.8-flash", 1, 1, 5.0, 100)
     upd = make_node(repo, mini_module, campaign_cost_cap_usd=1.0)(base_state(campaign))
     assert upd["budget_level"] == "paused" and upd["error"] == "budget_paused"

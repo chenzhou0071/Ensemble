@@ -67,9 +67,14 @@ def build_decide_node(client: LLMClient, module) -> Callable[[GameState], dict]:
             f"记忆上下文：\n{state.get('memory_context') or '（无）'}\n"
             f"玩家行动：\n{inputs_txt}"
         )
-        raw = client.chat("gm", [ChatMessage(role="system", content=DECIDE_SYSTEM),
-                                 ChatMessage(role="user", content=user)],
-                          _ctx(state), cheap=_cheap(state))
+        try:
+            raw = client.chat("gm", [ChatMessage(role="system", content=DECIDE_SYSTEM),
+                                     ChatMessage(role="user", content=user)],
+                              _ctx(state), cheap=_cheap(state))
+        except Exception:
+            # LLM 真异常（网络/超时/预算熔断）→ 失败不推进（规格 §8 统一原则）
+            return {"decision_raw": "", "error": "decide_failed",
+                    "degraded": {"decide_failed": True}}
         return {"decision_raw": raw}
 
     return gm_decide

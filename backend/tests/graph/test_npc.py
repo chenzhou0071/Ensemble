@@ -3,14 +3,14 @@ import copy
 from app.config import Pricing, PricingEntry, Settings
 from app.content.schema import Module
 from app.graph.npc import (assemble_persona, build_npc_dispatch, build_npc_subgraph,
-                           build_npc_worker)
+                           build_npc_worker, _parse_reaction_text)
 from app.llm.client import LLMClient
 
 
 def make_client(script):
-    settings = Settings(npc_model="deepseek-chat")
+    settings = Settings(npc_model="deepseek-flash")
     pricing = Pricing(models={
-        "deepseek-chat": PricingEntry(input_per_1k=0.00027, output_per_1k=0.0011)})
+        "deepseek-flash": PricingEntry(input_per_1k=0.00028, output_per_1k=0.00113)})
     built: dict = {}
 
     def factory(model, base_url, api_key):
@@ -52,7 +52,7 @@ def test_subgraph_parses_fenced_reaction():
     client, built = make_client(['```json\n{"speech": "站住！", "action": "伸手拦路"}\n```'])
     final = build_npc_subgraph(client).invoke(task_dict())
     assert final["reaction"] == {"npc_id": "guard", "speech": "站住！", "action": "伸手拦路"}
-    assert "deepseek-chat" in built
+    assert "deepseek-flash" in built
 
 
 def test_worker_silent_when_parse_fails():
@@ -106,3 +106,8 @@ def test_dispatch_name_mention_fallback(mini_module):
 def test_dispatch_no_candidates_returns_narrate(mini_module):
     d = build_npc_dispatch(mini_module)
     assert d(state_dict(decision={})) == "gm_narrate"
+
+def test_parse_reaction_null_speech_stays_empty():
+    """speech=null 时不能产出字符串 'None'（会混进叙事提示词）。"""
+    r = _parse_reaction_text('{"speech": null, "action": "抱臂而立"}', "guard")
+    assert r["speech"] == "" and r["action"] == "抱臂而立"

@@ -21,9 +21,9 @@ def test_dice_record_persists_seed(repo, campaign):
 
 def test_usage_totals(repo, campaign):
     b = campaign.active_branch_id
-    repo.record_usage(campaign.id, b, 1, "gm", "qwen-plus", 100, 200, 0.002, 900)
-    repo.record_usage(campaign.id, b, 1, "npc", "deepseek-chat", 50, 80, 0.0005, 700)
-    repo.record_usage(campaign.id, b, 2, "gm", "qwen-plus", 10, 20, 0.0002, 800)
+    repo.record_usage(campaign.id, b, 1, "gm", "qwen3.8-flash", 100, 200, 0.002, 900)
+    repo.record_usage(campaign.id, b, 1, "npc", "deepseek-flash", 50, 80, 0.0005, 700)
+    repo.record_usage(campaign.id, b, 2, "gm", "qwen3.8-flash", 10, 20, 0.0002, 800)
     assert repo.turn_token_total(campaign.id, b, 1) == 430
     assert repo.turn_token_total(campaign.id, b, 2) == 30
     assert abs(repo.campaign_cost_total(campaign.id) - 0.0027) < 1e-9

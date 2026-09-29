@@ -18,6 +18,12 @@ def test_budget_caps_env_override(monkeypatch):
     s2 = load_settings()
     assert s2.turn_token_cap == 100 and s2.campaign_cost_cap_usd == 999999.0
 
+def test_enable_thinking_defaults_off_with_env_override(monkeypatch):
+    monkeypatch.delenv("ENSEMBLE_ENABLE_THINKING", raising=False)
+    assert load_settings().enable_thinking is False
+    monkeypatch.setenv("ENSEMBLE_ENABLE_THINKING", "1")
+    assert load_settings().enable_thinking is True
+
 def test_pricing_loaded_from_yaml(tmp_path):
     p = tmp_path / "pricing.yaml"
     p.write_text("models:\n  m1: {input_per_1k: 0.001, output_per_1k: 0.002}\n", encoding="utf-8")

@@ -14,8 +14,8 @@ class Sink:
 
 
 def test_uses_extractor_role_and_records_usage():
-    settings = Settings(extractor_model="qwen-turbo")
-    pricing = Pricing(models={"qwen-turbo": PricingEntry(input_per_1k=0.1, output_per_1k=0.2)})
+    settings = Settings(extractor_model="qwen3.8-flash")
+    pricing = Pricing(models={"qwen3.8-flash": PricingEntry(input_per_1k=0.1, output_per_1k=0.2)})
     built = {}
 
     def factory(model, base_url, api_key):
@@ -28,6 +28,6 @@ def test_uses_extractor_role_and_records_usage():
     result = LLMSummarizer(client)("c1", "c1@main", 7,
                                    [ChatMessage(role="user", content="事件")])
     assert result == "压缩后的摘要"
-    assert "qwen-turbo" in built                        # extractor 路由
-    assert built["qwen-turbo"].calls[0][0].content == "事件"
-    assert sink.rows == [("c1", "c1@main", 7, "extractor", "qwen-turbo")]
+    assert "qwen3.8-flash" in built                        # extractor 路由
+    assert built["qwen3.8-flash"].calls[0][0].content == "事件"
+    assert sink.rows == [("c1", "c1@main", 7, "extractor", "qwen3.8-flash")]

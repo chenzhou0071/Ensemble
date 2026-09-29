@@ -3,10 +3,11 @@ from app.graph.nodes.gm import build_narrate_node
 from app.llm.client import LLMClient
 
 def make_client(script):
-    settings = Settings(gm_model="qwen-plus", cheap_model="qwen-turbo")
+    # gm 用真名；cheap 用虚构名以区分"超限切换"路由（生产两档同名，见 config.py）
+    settings = Settings(gm_model="qwen3.8-flash", cheap_model="alt-cheap-model")
     pricing = Pricing(models={
-        "qwen-plus": PricingEntry(input_per_1k=0.0008, output_per_1k=0.002),
-        "qwen-turbo": PricingEntry(input_per_1k=0.0003, output_per_1k=0.0006),
+        "qwen3.8-flash": PricingEntry(input_per_1k=0.0008, output_per_1k=0.002),
+        "alt-cheap-model": PricingEntry(input_per_1k=0.0003, output_per_1k=0.0006),
     })
     built: dict = {}
 
@@ -39,7 +40,7 @@ def test_narrate_returns_ordered_segments(campaign, mini_module):
 def test_prompt_contains_material_and_filters_silent_npc(campaign, mini_module):
     client, built = make_client(["有效叙事。"])
     build_narrate_node(client, mini_module)(base_state(campaign))
-    prompt = built["qwen-plus"].calls[0][1].content
+    prompt = built["qwen3.8-flash"].calls[0][1].content
     assert "村口" in prompt and "侦查" in prompt and "73/50" in prompt
     assert "站住！" in prompt and "王守卫" in prompt
     assert "调查员" in prompt and "pc_1" not in prompt  # 用角色名，不泄漏内部 id
@@ -49,7 +50,7 @@ def test_empty_output_retries_once(campaign, mini_module):
     client, built = make_client(["", "补上的有效叙事。"])
     upd = build_narrate_node(client, mini_module)(base_state(campaign))
     assert upd["narration"] == "补上的有效叙事。" and upd["error"] is None
-    assert len(built["qwen-plus"].calls) == 2
+    assert len(built["qwen3.8-flash"].calls) == 2
 
 def test_gives_up_after_one_repair(campaign, mini_module):
     client, built = make_client(["", "   "])
@@ -57,15 +58,15 @@ def test_gives_up_after_one_repair(campaign, mini_module):
     assert upd["error"] == "narrate_failed"
     assert upd["degraded"] == {"narrate_failed": True}
     assert upd["narration"] == "" and upd["narration_segments"] == []
-    assert len(built["qwen-plus"].calls) == 2
+    assert len(built["qwen3.8-flash"].calls) == 2
 
 def test_opening_embeds_opening_narration(campaign, mini_module):
     client, built = make_client(["开场叙事。"])
     build_narrate_node(client, mini_module)(base_state(campaign, is_opening=True, player_inputs=[]))
-    prompt = built["qwen-plus"].calls[0][1].content
+    prompt = built["qwen3.8-flash"].calls[0][1].content
     assert "开场叙述" in prompt  # mini_module.opening.narration
 
 def test_cheap_model_when_exceeded(campaign, mini_module):
     client, built = make_client(["开场叙事。"])
     build_narrate_node(client, mini_module)(base_state(campaign, budget_level="exceeded"))
-    assert "qwen-turbo" in built and "qwen-plus" not in built
+    assert "alt-cheap-model" in built and "qwen3.8-flash" not in built

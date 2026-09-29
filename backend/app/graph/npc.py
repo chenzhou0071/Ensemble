@@ -79,7 +79,8 @@ def _parse_reaction_text(raw: str, npc_id: str) -> dict:
     if start == -1 or end == -1 or end <= start:
         raise ValueError("no JSON object found in NPC output")
     data = json.loads(text[start:end + 1])
-    return {"npc_id": npc_id, "speech": str(data.get("speech", "")),
+    # speech 为 null 时不能 str(None) 产出 "None" 字符串（会混进叙事提示词）
+    return {"npc_id": npc_id, "speech": data.get("speech") or "",
             "action": data.get("action")}
 
 
