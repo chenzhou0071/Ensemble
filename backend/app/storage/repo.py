@@ -98,6 +98,10 @@ class SqliteRepository:
             s.commit()
 
     def get_state_at(self, campaign_id: str, branch_id: str, turn_id: int) -> dict | None:
+        """「截至 turn_id」的最新快照（时间旅行读）：查询 turn_id <= ?。
+
+        回合内、本轮快照写入前调用时，返回回合初始状态（post_turn 的场景对比依赖此语义）。
+        """
         q = (select(StateSnapshotRow).where(StateSnapshotRow.branch_id == branch_id,
                                             StateSnapshotRow.turn_id <= turn_id)
              .order_by(StateSnapshotRow.turn_id.desc(), StateSnapshotRow.id.desc()))

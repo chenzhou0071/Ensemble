@@ -1,4 +1,4 @@
-"""回合节点：intake / wait_input（本任务）与 resolve_checks / post_turn / fallback（Task 16）。"""
+"""回合节点：intake / wait_input / resolve_checks / apply_transition / post_turn / fallback。"""
 from langgraph.types import interrupt
 
 from app.graph.state import GameState
@@ -88,6 +88,21 @@ def build_resolve_checks_node(repo):
     return resolve_checks
 
 
+def build_apply_transition_node(module):
+    """应用 GM 裁决的场景移动：仅相邻场景生效，越界/无效目标静默忽略。"""
+
+    def apply_transition(state: GameState) -> dict:
+        tr = (state.get("decision") or {}).get("scene_transition")
+        to_scene = (tr or {}).get("to_scene")
+        if not to_scene:
+            return {}
+        if to_scene not in module.scene(state["scene_id"]).exits:
+            return {}
+        return {"scene_id": to_scene}
+
+    return apply_transition
+
+
 def build_post_turn_node(repo, memory):
     def post_turn(state: GameState) -> dict:
         campaign_id, branch_id, turn_id = state["campaign_id"], state["branch_id"], state["turn_id"]
@@ -96,8 +111,18 @@ def build_post_turn_node(repo, memory):
             repo.add_event(campaign_id, branch_id, turn_id, type="narration",
                            payload={"text": narration,
                                     "segments": state.get("narration_segments", [])})
+        # 场景移动回合：写 scene_changed 技术事件（持久化 + 供前端切换场景与 NPC 区，§4.3）
+        # get_state_at 语义为「≤ turn_id 的最新快照」：本轮快照随后才写入，此刻取到的
+        # 正是 intake 读过的回合初始状态（单写者：生产代码仅本节点写快照）
+        new_scene = state.get("scene_id")
+        old_scene = (repo.get_state_at(campaign_id, branch_id, turn_id) or {}).get("scene_id")
+        if old_scene and new_scene and old_scene != new_scene:
+            transition = (state.get("decision") or {}).get("scene_transition") or {}
+            repo.add_event(campaign_id, branch_id, turn_id, type="scene_changed",
+                           payload={"from_scene": old_scene, "to_scene": new_scene,
+                                    "reason": transition.get("reason") or ""})
         repo.append_state(campaign_id, branch_id, turn_id,
-                          {"scene_id": state.get("scene_id"),
+                          {"scene_id": new_scene,
                            "npc_attitudes": state.get("npc_attitudes", {})})
         memory.update_summaries(campaign_id, branch_id, turn_id)
         return {"turn_id": turn_id + 1, "decision": None}

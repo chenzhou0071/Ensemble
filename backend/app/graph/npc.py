@@ -124,13 +124,13 @@ def build_npc_dispatch(module) -> Callable[[GameState], list[Send] | str]:
         decision = state.get("decision") or {}
         triggers_raw = decision.get("proactive_npc_triggers", [])
         scene = module.scene(state["scene_id"])
-        known = {n.id for n in module.npcs}
 
         triggers: dict[str, str] = {}
         candidates: list[str] = []
         for t in triggers_raw:
             npc_id = t.get("npc_id")
-            if npc_id in known and npc_id not in candidates:
+            # 仅在场的 NPC 可被触发；越界/不在场的触发静默忽略（防“幽灵在场”）
+            if npc_id in scene.npcs and npc_id not in candidates:
                 candidates.append(npc_id)
                 triggers[npc_id] = t.get("trigger", "")
 

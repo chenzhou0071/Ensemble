@@ -1,4 +1,7 @@
+import copy
+
 from app.config import Pricing, PricingEntry, Settings
+from app.content.schema import Module
 from app.graph.npc import (assemble_persona, build_npc_dispatch, build_npc_subgraph,
                            build_npc_worker)
 from app.llm.client import LLMClient
@@ -66,14 +69,24 @@ def test_worker_silent_when_llm_raises():
     assert out["npc_reactions"] == {"guard": {"npc_id": "guard", "speech": "", "action": None}}
 
 
-def test_dispatch_dedups_and_filters_unknown(mini_module):
+def test_dispatch_dedups_and_filters_out_of_scene(mini_module):
     d = build_npc_dispatch(mini_module)
     state = state_dict(decision={"proactive_npc_triggers": [
         {"npc_id": "guard", "trigger": "t1"}, {"npc_id": "guard"}, {"npc_id": "ghost"},
         {"npc_id": "barkeep", "trigger": "t2"}]})
-    sends = d(state)
-    assert [s.arg["npc_id"] for s in sends] == ["guard", "barkeep"]
+    sends = d(state)  # guard 在村口保留；ghost 未知、barkeep 在酒馆 → 都被过滤
+    assert [s.arg["npc_id"] for s in sends] == ["guard"]
     assert sends[0].arg["npc_name"] == "王守卫" and sends[0].arg["trigger"] == "t1"
+
+
+def test_dispatch_both_npcs_in_scene_two_sends(mini_module):
+    data = copy.deepcopy(mini_module.model_dump())
+    data["scenes"][0]["npcs"] = ["guard", "barkeep"]  # 同场景两人
+    mod = Module.model_validate(data)
+    d = build_npc_dispatch(mod)
+    state = state_dict(decision={"proactive_npc_triggers": [
+        {"npc_id": "guard", "trigger": "t1"}, {"npc_id": "barkeep", "trigger": "t2"}]})
+    assert [s.arg["npc_id"] for s in d(state)] == ["guard", "barkeep"]
 
 
 def test_dispatch_tight_keeps_first_only(mini_module):

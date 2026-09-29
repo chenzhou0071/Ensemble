@@ -27,6 +27,34 @@ def test_post_turn_persists_and_advances(repo, campaign):
     payload = json.loads(events[0].payload_json)
     assert payload["segments"][1]["speaker"] == "npc:barkeep"
 
+def test_post_turn_emits_scene_changed_on_move(repo, campaign):
+    repo.append_state(campaign.id, campaign.active_branch_id, 1,
+                      {"scene_id": "gate", "npc_attitudes": {}})
+    build_post_turn_node(repo, SpyMemory())(
+        base_state(campaign, decision={"scene_transition": {"to_scene": "tavern",
+                                                            "reason": "推门而入"}}))
+    events = repo.list_events(campaign.id, campaign.active_branch_id,
+                              types=["scene_changed"])
+    assert len(events) == 1
+    assert json.loads(events[0].payload_json) == {"from_scene": "gate",
+                                                  "to_scene": "tavern",
+                                                  "reason": "推门而入"}
+
+
+def test_post_turn_no_scene_changed_when_unchanged(repo, campaign):
+    repo.append_state(campaign.id, campaign.active_branch_id, 1,
+                      {"scene_id": "tavern", "npc_attitudes": {}})
+    build_post_turn_node(repo, SpyMemory())(base_state(campaign))
+    assert repo.list_events(campaign.id, campaign.active_branch_id,
+                            types=["scene_changed"]) == []
+
+
+def test_post_turn_no_scene_changed_without_prior_snapshot(repo, campaign):
+    build_post_turn_node(repo, SpyMemory())(base_state(campaign))
+    assert repo.list_events(campaign.id, campaign.active_branch_id,
+                            types=["scene_changed"]) == []
+
+
 def test_fallback_clears_pending_keeps_error():
     upd = fallback({"error": "decision_invalid", "npc_reactions": {"a": {}}, "narration": "x"})
     assert upd["error"] == "decision_invalid"  # error 保留（调用方读取后由 wait_input 清除）
