@@ -1,0 +1,84 @@
+meta:
+  id: misty_hollow
+  title: 雾霭镇的低语
+  author: Ensemble
+  version: "0.1"
+  system: coc-lite
+
+opening:
+  narration: |
+    1927 年深秋，你们乘坐的班车在雾霭镇外的岔路口抛了锚。
+    司机怎么也不肯再往前开：「前面那座镇子……最近不太干净。」
+    暮色四合，雾从山谷里漫上来，把镇口的石桥吞掉了一半。
+  scene_id: square
+  player_goal: 查明磨坊学徒失踪的真相，并决定如何对待镇上的「低语」。
+
+scenes:
+  - id: square
+    name: 镇中心广场
+    description: 石砌广场中央立着一座被磨平了五官的旧神像，四周店铺多半关了门。
+    npcs: [elder]
+    exits: [inn, mill]
+    clues: [clue_missing]
+  - id: inn
+    name: 白鹭旅店
+    description: 镇上唯一还亮着灯的旅店，壁炉的火烧得很旺，客人们却压低声音说话。
+    npcs: [innkeeper]
+    exits: [square]
+    clues: [clue_diary]
+  - id: mill
+    name: 老磨坊
+    description: 河边的磨坊早已停转，木门上贴着褪色的封条，麦壳从门缝里漏出来。
+    npcs: [miller]
+    exits: [square, cellar]
+    clues: [clue_wheat]
+  - id: cellar
+    name: 磨坊地窖
+    description: 潮湿的石阶通向地底，墙壁上刻满了无人能辨的纹路，空气里有股铁锈味。
+    npcs: [whisperer]
+    exits: [mill]
+    clues: [clue_altar]
+
+npcs:
+  - id: elder
+    name: 陈长老
+    persona: 镇上年岁最长的老人，说话极慢，每句话都像掂量过重量；他知道神像与低语的事，但只在信任建立后吐露。
+    knowledge: [神像的来历, 十年前的那场「献祭」]
+    initial_attitude: 40
+  - id: innkeeper
+    name: 何老板
+    persona: 健谈而热络的旅店老板，消息灵通，但谈及磨坊时总会突然岔开话题。
+    knowledge: [镇上近况, 客人失踪的传闻]
+    initial_attitude: 60
+  - id: miller
+    name: 磨坊主老赵
+    persona: 自从学徒失踪后整日酗酒的消瘦男人，悔恨与恐惧交织，提防任何打听地窖的人。
+    knowledge: [学徒失踪当晚的细节, 地窖的门锁在哪]
+    initial_attitude: 30
+  - id: whisperer
+    name: 低语者
+    persona: 栖身地窖的存在，用多重叠音说话，自称是「守约者」，试图与来者做一笔关于记忆的交易。
+    knowledge: [镇子的旧约, 神像的秘密]
+    initial_attitude: 50
+
+clues:
+  - id: clue_missing
+    content: 公告栏上贴着泛黄的寻人启事：学徒小满，三个月前失踪，最后目击地在老磨坊。
+    unlocks: ["clue:clue_diary"]
+  - id: clue_diary
+    content: 旅店客人遗落的日记提到：「满月夜里，地窖的门自己开了。」
+    unlocks: ["clue:clue_wheat"]
+  - id: clue_wheat
+    content: 磨坊的麦堆里混着黑色的穗子，捻碎后散发出与神像同样的石粉味。
+    unlocks: ["clue:clue_altar"]
+  - id: clue_altar
+    content: 地窖深处有一圈刻满纹路的石台，中央的凹槽尺寸恰好放得下一个人。
+    unlocks: []
+
+endings:
+  - id: ending_break
+    scene: cellar
+    condition: 摧毁石台、终结旧约（需要掌握「地窖祭坛」的真相）
+  - id: ending_flee
+    scene: square
+    condition: 在天亮前带着幸存者离开雾霭镇

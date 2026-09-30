@@ -1,3 +1,9 @@
+import sys
+from pathlib import Path
+
+# 确保 `import harness.replay` 稳定可用（不依赖 pytest 的 prepend 行为）
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 import pytest
 
 from app.content.schema import Module
@@ -32,3 +38,13 @@ def repo(tmp_path):
 @pytest.fixture
 def campaign(repo):
     return repo.create_campaign("mini", "测试局")
+
+
+def pytest_addoption(parser):
+    parser.addoption("--record", action="store_true", default=False,
+                     help="使用真实 LLM 重录回放基线（需要 API key 与网络）")
+
+
+@pytest.fixture
+def record_mode(pytestconfig) -> bool:
+    return bool(pytestconfig.getoption("--record"))

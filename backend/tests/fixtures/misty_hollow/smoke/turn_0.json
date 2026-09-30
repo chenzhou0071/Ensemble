@@ -1,0 +1,8 @@
+{
+  "responses": [
+    {"model": "qwen3.8-flash", "text": "{\"intent_summary\": \"开场：玩家抵达镇口\", \"checks\": [], \"proactive_npc_triggers\": [{\"npc_id\": \"elder\", \"trigger\": \"长老在广场等着来客\"}], \"scene_transition\": null, \"memory_queries\": []}"},
+    {"model": "deepseek-flash", "text": "{\"speech\": \"你们就是信里说的外乡人？近来镇上……不太平。\", \"action\": \"拄着拐杖从神像旁踱出来\"}"},
+    {"model": "qwen3.8-flash", "text": "暮色把雾霭镇压得很低。广场中央的神像没有脸，只有一片被磨平的石面。[[npc:elder]]你们就是信里说的外乡人？近来镇上……不太平。[[/npc]]老人的目光在你们脸上停了很久。"}
+  ],
+  "seeds": []
+}

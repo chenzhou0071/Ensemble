@@ -1,0 +1,8 @@
+{
+  "responses": [
+    {"model": "qwen3.8-flash", "text": "{\"intent_summary\": \"向陈长老打听失踪的学徒\", \"checks\": [{\"actor\": \"pc_p1\", \"skill\": \"话术\", \"difficulty\": \"regular\"}], \"proactive_npc_triggers\": [{\"npc_id\": \"elder\", \"trigger\": \"玩家当面问起失踪案\"}], \"scene_transition\": null, \"memory_queries\": [\"学徒失踪\"]}"},
+    {"model": "deepseek-flash", "text": "{\"speech\": \"三个月了……老赵的学徒进了地窖，再没出来。你们要查，就去旅店找何老板拿日记。\", \"action\": \"压低声音，目光扫向磨坊方向\"}"},
+    {"model": "qwen3.8-flash", "text": "长老的声音在雾气里发颤。[[npc:elder]]三个月了……老赵的学徒进了地窖，再没出来。[[/npc]]他顿了顿，抬手指向街角还亮着灯的白鹭旅店。"}
+  ],
+  "seeds": [20260924]
+}
