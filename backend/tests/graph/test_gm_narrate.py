@@ -62,9 +62,41 @@ def test_gives_up_after_one_repair(campaign, mini_module):
 
 def test_opening_embeds_opening_narration(campaign, mini_module):
     client, built = make_client(["开场叙事。"])
-    build_narrate_node(client, mini_module)(base_state(campaign, is_opening=True, player_inputs=[]))
+    upd = build_narrate_node(client, mini_module)(base_state(campaign, is_opening=True, player_inputs=[]))
     prompt = built["qwen3.8-flash"].calls[0][1].content
-    assert "开场叙述" in prompt  # mini_module.opening.narration
+    assert "开场叙述" in prompt  # 模组原文仍作为衔接参考注入
+    assert "无需你重复或改写" in prompt and "不要复述开场白" in prompt
+    # 开场白由代码置顶保证逐字保真（提示词契约两次实玩均被模型改写丢弃）
+    assert upd["narration"].startswith("开场叙述")
+    assert upd["narration_segments"][0] == {"speaker": "gm", "text": "开场叙述"}
+    assert upd["narration_segments"][-1]["text"] == "开场叙事。"
+
+
+def test_narration_continues_from_previous_tail(campaign, mini_module, repo):
+    repo.add_event(campaign.id, campaign.active_branch_id, 0, type="narration",
+                   payload={"text": "旧叙事开头。" + "铺垫" * 80 + "结尾锚点甲乙丙"})
+    client, built = make_client(["承接叙事。"])
+    build_narrate_node(client, mini_module, repo)(base_state(campaign))
+    system = built["qwen3.8-flash"].calls[0][0].content
+    prompt = built["qwen3.8-flash"].calls[0][1].content
+    assert "不重复描写" in system        # 防重复规则
+    assert "不要换成其他身份称呼" in system  # NPC 命名规则（实玩出现把陈长老写成「店主」）
+    assert "不得虚构未发生过的行动或接触" in system  # 防虚构接触（实玩出现「指尖余温」）
+    assert "不要把答案或下一步指令写得太直白" in system  # 失败前进：结果可隐晦（谜语/警告/举动）
+    assert "不得引入模组外的具体人物" in system  # 防捏人（实玩出现凭空「兜帽人」）
+    assert "也不要给背景人物取名" in system  # 背景人物不取名（实玩出现「老周」）
+    assert "结尾锚点甲乙丙" in prompt      # 上一回合结尾作为接续锚点注入
+    assert "旧叙事开头" not in prompt     # 只注入结尾片段，不整段回灌
+
+def test_prev_tail_strips_npc_markers(campaign, mini_module, repo):
+    repo.add_event(campaign.id, campaign.active_branch_id, 0, type="narration",
+                   payload={"text": "述" * 80 + "[[npc:guard]]暗号甲乙[[/npc]]" + "尾" * 50})
+    client, built = make_client(["继续。"])
+    build_narrate_node(client, mini_module, repo)(base_state(campaign))
+    prompt = built["qwen3.8-flash"].calls[0][1].content
+    assert "暗号甲乙" in prompt                     # 结尾锚点在注入范围内
+    assert "[[npc:" not in prompt and "[[/npc]]" not in prompt  # 标记碎片已剥离
+
 
 def test_cheap_model_when_exceeded(campaign, mini_module):
     client, built = make_client(["开场叙事。"])

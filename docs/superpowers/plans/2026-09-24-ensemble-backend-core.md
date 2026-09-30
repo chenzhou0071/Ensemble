@@ -5632,6 +5632,69 @@ git commit -m "feat(cli): single-player loop with resume-after-restart (M2 exit)
 
 ---
 
+### Task 25: 真机验收修复批次（2026-09-30）
+
+**背景**：M2 出口真机验收（campaign `092797878e33`）发现四类问题；本任务为修复记录（代码与测试已落地，全量 145 passed, 1 skipped；TDD 全部红→绿；净增 3 个测试）。
+
+**根因与修改**：
+
+1. **间歇性 `resolve_failed`（真 bug，已复现）**——`new_seed()` 用 `secrets.randbits(64)`：种子 ≥ `2**63` 时 SQLite INTEGER（有符号 64 位）写库抛 `OverflowError`，约 50% 概率掷骰必失败（副本压测 600 次复现 158 次全为该异常；原样重放炸出）。
+   - `app/rules/dice.py`：`randbits(64)` → `randbits(63)`（附注释：SQLite INTEGER 有符号 64 位上限）；
+   - `tests/rules/test_dice.py`：`test_new_seed_within_64bit`（断言 `< 2**64` 把 bug 锁成了规格）→ `test_new_seed_fits_sqlite_integer`（64 次采样断言 `0 <= s < 2**63`）。
+
+2. **模组开场白被改写丢失**（班车/司机/石桥未出现）——提示词措辞"请扩写为叙事"导致模型自由改写。
+   - `app/graph/nodes/gm.py`：开场白注入改为"既成事实"契约（其中人物、事件、地点不得删改或省略）；
+   - `tests/graph/test_gm_narrate.py`：`test_opening_embeds_opening_narration` 扩展断言。
+
+3. **环境描述反复重复**——每回合完整注入场景描述且无接续锚点。
+   - `gm.py`：`NARRATE_SYSTEM` 新增规则 7（不重复描写：仅场景首次出现或切换时描写环境，其余从玩家行动结果或上一回合结尾承接）；narrate 节点新增"上一回合结尾"接续锚点（读最近 narration 事件尾 120 字）；`build_narrate_node(client, module, repo)`，`app/graph/main.py` 传 `repo`；
+   - `test_gm_narrate.py`：新增 `test_narration_continues_from_previous_tail`。
+
+4. **NPC 不知道镇内地名 / 不知道自己的内幕清单**（陈长老说不出"白鹭旅店"）——NPC 提示词无地点表；`NpcDef.knowledge` 全库零消费。
+   - `app/graph/npc.py`：dispatch 新增 `known_places`（相邻场景名，`_exit_names`）与 `knowledge`（模组清单）；`assemble_persona` 注入"你知道的镇上地点"与"你掌握的背景知识（仅在建立信任/被直接问起/情节需要时透露，不要主动和盘托出）"，空清单自动省略；
+   - `tests/graph/test_npc.py`：新增 `test_dispatch_passes_knowledge_and_places`、`test_assemble_persona_omits_empty_knowledge`，扩展 persona 断言。
+
+5. **纯代码节点兜底静默无痕**——`_guarded` 吞异常仅置 error。
+   - `app/graph/main.py`：`_guarded` 加 `logger.exception("节点真异常兜底：%s", code)`；
+   - `tests/graph/test_degradation_paths.py`：`test_resolve_failure_falls_back` 加 caplog 断言（错误码 + 原始异常文本留痕）。
+
+**验收后二次修正（同日）：开场白改为代码级置顶保真**
+
+二局实玩（campaign `090dc3572ad1`）复验：开场白仍被模型改写丢失。从检查点重放 turn0 提示词证实**模组原文确已完整注入**（含"既成事实/不得删改"契约）——系 GM 模型无视契约自行重编，提示词保真路线两度实证不可靠。改法：
+
+- `gm.py` narrate 节点：开场回合由代码将 `module.opening.narration.strip()` **逐字置顶**拼入叙事（`narration` 与 `narration_segments[0]`），模型只写其后的衔接段；提示词改为"原文将直接呈现，无需重复或改写；请接着写下去"；
+- `NARRATE_SYSTEM` 新增规则 8：旁白提及 NPC 一律用其名字，不得换成其他身份称呼（实玩出现把陈长老写成「店主」，全仓库零来源，系模型串词）；
+- 接续锚点（上一回合结尾）注入前剥离 `[[npc:…]]` 标记，防标记碎片半截入提示词；
+- 测试：`test_opening_embeds_opening_narration` 改断代码置顶行为；新增 `test_prev_tail_strips_npc_markers`；命名规则断言。
+- `NARRATE_SYSTEM` 规则 6 补：不得虚构未发生过的行动或接触（实玩出现「指尖余温」——并未发生握手）。
+
+**追加：社交检定回应尺度（失败前进 + 谜语人风格，用户提出）**
+
+三局实玩（campaign `d294687c114e`）核对发现：NPC 本已能收到检定结果（`check_results` 注入），但**没有分级规则**，失败回合行为摇摆（有时直给方向、有时拒绝交流）。定案口味：**成功不直给、失败不指路**——检定只决定"说多少"，风格恒定为隐晦。改法：
+
+- `npc.py`：新增 `_SOCIAL_SCALE` 分级尺度块（仅在有检定时注入）：极难/暴击=内幕全给但必须用谜语讲；困难=只说一半+模糊方位；普通=只松一丝口风；失败=零内幕零指令，只用态度/沉默/意有所指的举动；连续失败=警惕升级。护栏：谜面只能用已知内幕与镇上既有事物拼成，不得编造新事实、不得误导；
+- 检定行改为可读等级（`- 话术（常规难度）：失败`，原为 69/45 裸数字；`_check_line` 带缺字段兜底）；
+- `DECIDE_SYSTEM` 规则 8：社交检定失败也要让 NPC 在场回应，不得让场面停滞或写成拒绝交流；
+- `NARRATE_SYSTEM` 规则 9：失败结果要有推进感（沉默/警告/谜语/举动），不要把答案或下一步指令写得太直白；
+- 测试：`test_social_scale_injected_with_check_levels`、`test_social_scale_omitted_without_checks`、`test_decide_system_has_fail_forward_rule`。
+
+**四探追加：禁止捏造可互动人物（实玩出现凭空「兜帽人」）**
+
+四局实玩（campaign `321ff9bb6c32`）核对发现：旁白凭空塑造了一个"戴兜帽的可疑身影"并引导玩家互动——全库零来源（模组 NPC 仅四人、当时无任何 NPC 调用），系 narrate 模型把"侦查·困难成功=发现点什么"转写成了"编个人物喂氛围"，钻了规则 6"可补充环境细节"的空子。修复：`NARRATE_SYSTEM` 规则 10——不得引入模组外的具体人物（背景人群一笔带过，如「几个客人」）；玩家指向不存在人物时用自然方式淡化，不得让其成为剧情角色。
+
+**五探追加：背景人物不取名（实玩出现 NPC 即兴命名「老周」）**
+
+五局实玩（campaign `30126d925d8a`）核对：规则 10 已杜绝凭空人物，但 NPC 拦话时给背景客人即兴取名「老周」（与模组磨坊主「老赵」近音，且旁白出现「客人/伙计」身份漂移）。修复：`NARRATE_SYSTEM` 规则 10 补充"不给背景人物取名或赋予可被追究的身份"；`NPC_SYSTEM` 补充"提及其他人物只用泛称，不给背景人物取名或编造身份"。
+
+**验证**：
+
+Run: `cd backend; uv run pytest -q`
+Expected: **149 passed, 1 skipped**（净增 7）
+
+真机复验（待用户执行）：对同一 NPC 连问数次——失败回合应为态度/暗示级回应（不得出现"去某地做某事"式直白指令），极难成功应给谜语式内幕；旁白不得出现模组外的具体人物、背景人物不得被取名；旧验收项（开场白逐字/零 `resolve_failed`/称呼不乱）已在三局实玩通过。
+
+---
+
 ## 计划自审（Self-Review）
 
 **1. 规格覆盖对照**（规格 §2-§13 → 任务映射）：

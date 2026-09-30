@@ -6,9 +6,11 @@ def test_roll_is_deterministic_for_same_seed():
 def test_roll_within_range_for_many_seeds():
     assert all(1 <= roll_d100(s) <= 100 for s in range(1000))
 
-def test_new_seed_within_64bit():
-    s = new_seed()
-    assert 0 <= s < 2**64
+def test_new_seed_fits_sqlite_integer():
+    # SQLite INTEGER 为有符号 64 位：种子 ≥2**63 时 add_dice_record 写库溢出
+    # （真机验收 resolve_failed 事故根因：randbits(64) 约半数超界）
+    samples = [new_seed() for _ in range(64)]
+    assert all(0 <= s < 2**63 for s in samples)
 
 def test_new_seed_varies():
     assert new_seed() != new_seed()

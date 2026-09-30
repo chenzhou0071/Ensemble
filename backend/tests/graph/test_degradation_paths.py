@@ -4,6 +4,8 @@
 validate repair 失败由 test_validate_failure_falls_back_to_wait 覆盖；
 NPC 沉默单元级由 test_npc 覆盖，此处补图级。
 """
+import logging
+
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import Command
 
@@ -137,7 +139,7 @@ def test_exceeded_switches_gm_to_cheap_model(repo, campaign, mini_module):
     assert spy.context_budgets == [1200, 600]     # 阶梯①逐级累积：开场 OK 档仍 1200，EXCEEDED 回合 600
 
 
-def test_resolve_failure_falls_back(repo, campaign, mini_module, monkeypatch):
+def test_resolve_failure_falls_back(repo, campaign, mini_module, monkeypatch, caplog):
     def boom(*args, **kwargs):
         raise RuntimeError("dice broken")
 
@@ -149,12 +151,15 @@ def test_resolve_failure_falls_back(repo, campaign, mini_module, monkeypatch):
                             {"qwen3.8-flash": [OPENING_DECIDE, OPENING_NARR, check_decide]})
     cfg = config_for(repo, campaign)
     graph.invoke(init_state(campaign), cfg)
-    graph.invoke(RESUME_TURN1, cfg)
+    with caplog.at_level(logging.ERROR, logger="app.graph.main"):
+        graph.invoke(RESUME_TURN1, cfg)
     snap = graph.get_state(cfg)
     assert snap.next == ("wait_input",)
     assert snap.values["error"] == "resolve_failed"   # 纯代码节点兜底（_guarded）
     assert snap.values["degraded"] == {}              # 失败不推进：本轮 pending（含标记）丢弃
     assert snap.values["turn_id"] == 1                # 失败不推进
+    assert "resolve_failed" in caplog.text            # 真异常必须留痕（logger.exception）
+    assert "dice broken" in caplog.text
 
 
 class BrokenGetContextMemory:

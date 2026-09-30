@@ -4,6 +4,7 @@
 - 失败不推进 → fallback → wait_input（本轮 pending 丢弃，玩家重来）
 - 战役熔断（④）→ 直接结束图，等待手动调高预算
 """
+import logging
 import sqlite3
 from typing import Callable
 
@@ -17,6 +18,8 @@ from app.graph.nodes.turn import (build_apply_transition_node, build_intake_node
                                   build_post_turn_node, build_resolve_checks_node,
                                   fallback, wait_input)
 from app.graph.state import GameState
+
+logger = logging.getLogger(__name__)
 
 
 def build_checkpointer(sqlite_path: str) -> SqliteSaver:
@@ -34,6 +37,7 @@ def _guarded(code: str, fn: Callable) -> Callable:
         try:
             return fn(state)
         except Exception:
+            logger.exception("节点真异常兜底：%s", code)  # 降级静默但必须留痕（排障入口）
             return {"error": code, "degraded": {code: True}}
 
     return wrapped
@@ -69,7 +73,7 @@ def build_game_graph(repo, module, memory, client, guard, checkpointer=None):
     g.add_node("apply_transition", build_apply_transition_node(module))
     g.add_node("memory_query", build_memory_query_node(memory))
     g.add_node("npc_respond", build_npc_worker(build_npc_subgraph(client)))
-    g.add_node("gm_narrate", build_narrate_node(client, module))
+    g.add_node("gm_narrate", build_narrate_node(client, module, repo))
     g.add_node("post_turn", build_post_turn_node(repo, memory))
     g.add_node("wait_input", wait_input)
     g.add_node("fallback", fallback)

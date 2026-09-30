@@ -82,3 +82,8 @@ def test_decide_llm_error_returns_degraded(campaign, mini_module):
     assert upd["error"] == "decide_failed"
     assert upd["degraded"] == {"decide_failed": True}
     assert upd["decision_raw"] == ""
+
+
+def test_decide_system_has_fail_forward_rule():
+    """社交失败不得让场面停滞（失败前进：可冷淡/回避/暗示，但不能写成拒绝交流）。"""
+    assert "不得让场面停滞" in DECIDE_SYSTEM
