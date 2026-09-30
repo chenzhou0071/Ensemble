@@ -5197,6 +5197,8 @@ git commit -m "feat(test): record/replay harness with misty hollow baseline fixt
 **Files:**
 - Create: `backend/app/cli.py`
 - Modify: `backend/pyproject.toml`（追加 `[project.scripts]`）
+- Modify: `backend/tests/content/test_schema.py`（覆盖率口径：schema 查找辅助命中/缺失路径）
+- Modify: `.gitignore`（SQLite 附属文件 `*.db-shm`/`*.db-wal`/`*.db-journal` 不入库）
 - Test: `backend/tests/test_cli.py`
 
 **Interfaces:**
@@ -5207,7 +5209,7 @@ git commit -m "feat(test): record/replay harness with misty hollow baseline fixt
   - **异步摘要接线（Task 18b）**：`JournalMemory(repo, summarizer=LLMSummarizer(client))` + `BackgroundQueue(name="summary")` + `BackgroundSummaries` 包装进 `build_game_graph`；`main` 退出前 `queue.flush(2.0)`
   - `render_narration(segments, module) -> list[str]`（`gm` → 原文；`npc:<id>` → `【NPC 名】台词`）
   - `play_loop(graph, config, module, turn_id, input_fn, print_fn) -> str`（`"quit"` / `"paused"`；退出语：`quit/exit/q/退出`）
-  - `run_play(ctx, campaign_id, input_fn=input, print_fn=print) -> str`：全新线程 → 跑开场；`next == ("wait_input",)` → **断点续玩**（打印"读取存档，继续运行"）；已结束 → 直接返回
+  - `run_play(ctx, campaign_id, input_fn=input, print_fn=print) -> str`：全新线程 → 跑开场；`next == ("wait_input",)` → **断点续玩**（打印"读取存档，继续运行"）；熔断暂停存档（`error == "budget_paused"`，图停在 END）→ 以上调后的上限重驱动挂起回合（规格 §9）；其余已结束 → 直接返回
   - `main(argv=None) -> int`：`new <module_path> <title>`（建战役 + 默认角色）、`play <campaign_id> <module_path>`
 
 - [ ] **Step 1: 写失败测试**
@@ -5290,6 +5292,35 @@ def test_run_play_reports_paused(repo, campaign, mini_module):
     assert code == "paused"
     assert any("预算" in line for line in lines)
     assert calls == []
+
+def test_resume_after_budget_pause(repo, campaign, mini_module):
+    """熔断暂停后调高上限，重跑同一战役可续（规格 §9：手动恢复或调高预算）。"""
+    repo.record_usage(campaign.id, campaign.active_branch_id, 0, "gm", "qwen3.8-flash",
+                      1, 1, 5.0, 100)                     # 成本 5.0 > 上限 2.0 → 熔断
+    saver = MemorySaver()
+    graph1, calls1 = make_env(repo, mini_module, {}, checkpointer=saver,
+                              settings=Settings(campaign_cost_cap_usd=2.0))
+    lines1: list[str] = []
+    ctx1 = AppContext(settings=Settings(campaign_cost_cap_usd=2.0), repo=repo,
+                      module=mini_module, client=None, guard=None, memory=None,
+                      graph=graph1)
+    assert run_play(ctx1, campaign.id, input_fn=lambda _: "x", print_fn=lines1.append) == "paused"
+    assert any("预算" in line for line in lines1) and calls1 == []
+
+    # 调高上限重建（模拟改配置后的新进程；同一存档）
+    graph2, calls2 = make_env(repo, mini_module, {"qwen3.8-flash": [
+        OPENING_DECIDE, OPENING_NARR, PLAIN_DECIDE, "灯影摇晃，走廊尽头传来脚步声。"]},
+        checkpointer=saver, settings=Settings(campaign_cost_cap_usd=10.0))
+    lines2: list[str] = []
+    inputs = iter(["我推门进去", "退出"])
+    ctx2 = AppContext(settings=Settings(campaign_cost_cap_usd=10.0), repo=repo,
+                      module=mini_module, client=None, guard=None, memory=None,
+                      graph=graph2)
+    code = run_play(ctx2, campaign.id, input_fn=lambda _: next(inputs), print_fn=lines2.append)
+    assert code == "quit"
+    assert any("暂停" in line for line in lines2)         # 识别出暂停存档并恢复
+    assert any("雾气" in line for line in lines2)         # 挂起的开场补跑并渲染
+    assert graph2.get_state(config_for(repo, campaign)).values["turn_id"] == 2
 
 def test_resume_after_process_restart(tmp_path, mini_module):
     """M2 出口标准：模拟进程重启（新连接 + 新图），断点续玩成立。"""
@@ -5399,7 +5430,11 @@ def assemble(settings: Settings, module_path: str | Path) -> AppContext:
     repo = SqliteRepository(make_engine(settings.sqlite_path))
     init_db(repo.engine)
     module = load_module(module_path)
-    pricing = load_pricing(settings.pricing_path)
+    # 定价表路径：CWD 相对优先；找不到则回退仓库根（CLI 常在 backend/ 下运行）
+    pricing_path = Path(settings.pricing_path)
+    if not pricing_path.exists():
+        pricing_path = Path(__file__).resolve().parents[2] / settings.pricing_path
+    pricing = load_pricing(pricing_path)
     guard = BudgetGuard(settings)
     client = LLMClient(settings, pricing, usage_sink=repo,
                        budget_probe=make_repo_budget_probe(repo, guard))
@@ -5484,6 +5519,25 @@ def run_play(ctx: AppContext, campaign_id: str, input_fn=input, print_fn=print) 
         return "quit"
 
     if snap.values:
+        if snap.values.get("error") == "budget_paused":
+            # 熔断暂停的存档（图停在 END）：调高上限后重驱动挂起的回合（规格 §9）
+            print_fn("（检测到预算暂停的存档，以上调后的上限继续运行）")
+            result = ctx.graph.invoke({"campaign_id": campaign.id,
+                                       "branch_id": campaign.active_branch_id,
+                                       "turn_id": int(snap.values.get("turn_id", 0)),
+                                       "player_inputs": list(snap.values.get("player_inputs", []))},
+                                      config)
+            if result.get("error") == "budget_paused":
+                print_fn("本局预算仍不足（budget paused）。调高上限后重新运行 play。")
+                return "paused"
+            for line in render_narration(result.get("narration_segments", []), ctx.module):
+                print_fn(line)
+            interrupts = result.get("__interrupt__")
+            if not interrupts:
+                print_fn("（图执行结束）")
+                return "quit"
+            return play_loop(ctx.graph, config, ctx.module,
+                             interrupts[0].value["turn_id"], input_fn, print_fn)
         print_fn("（本局已结束）")
         return "quit"
 
@@ -5551,12 +5605,12 @@ ensemble = "app.cli:main"
 - [ ] **Step 5: 验证通过**
 
 Run: `cd backend; uv run pytest tests/test_cli.py -q`
-Expected: PASS（4 passed）
+Expected: PASS（5 passed）
 
 - [ ] **Step 6: 全量回归 + 覆盖率检查**
 
 Run: `cd backend; uv run pytest -q; uv run pytest --cov=app --cov-report=term-missing tests/rules tests/content -q`
-Expected: 全绿；rules 覆盖率 100%，content 校验器每条规则均有正/反用例
+Expected: 全绿（142 passed, 1 skipped）；rules 覆盖率 100%，content（loader/schema/validate）100%——schema 查找辅助的正/反路径已在 test_schema.py 补齐
 
 - [ ] **Step 7: 手动验收（可选，需要真实 API key）**
 
@@ -5572,7 +5626,7 @@ uv run python -m app.cli play <campaign_id> ../modules/misty_hollow.yaml
 - [ ] **Step 8: Commit**
 
 ```bash
-git add backend/app/cli.py backend/pyproject.toml backend/tests/test_cli.py
+git add backend/app/cli.py backend/pyproject.toml backend/tests/test_cli.py backend/tests/content/test_schema.py .gitignore
 git commit -m "feat(cli): single-player loop with resume-after-restart (M2 exit)"
 ```
 
