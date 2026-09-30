@@ -7,6 +7,9 @@ dependencies = [
   "pydantic>=2", "pyyaml", "sqlmodel", "openai",
 ]
 
+[project.scripts]
+ensemble = "app.cli:main"
+
 [dependency-groups]
 dev = ["pytest", "pytest-cov"]
 

@@ -21,8 +21,13 @@ def test_lookup_helpers():
     m = Module.model_validate(MINIMAL)
     assert m.scene("gate").name == "村口"
     assert m.npc("guard").name == "王守卫"
+    assert m.ending("e1").scene == "tavern"
 
 def test_lookup_missing_raises_key_error():
     m = Module.model_validate(MINIMAL)
     with pytest.raises(KeyError):
         m.scene("nowhere")
+    with pytest.raises(KeyError):
+        m.npc("nowhere")
+    with pytest.raises(KeyError):
+        m.ending("nowhere")
