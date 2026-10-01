@@ -595,33 +595,43 @@ def _stream_writer():
     def gm_narrate(state: GameState) -> dict:
         scene = module.scene(state["scene_id"])
         inputs_txt = "\n".join(
-            f"- {i['player_id']}: {i['text']}" for i in state.get("player_inputs", [])
+            f"- {_char_name(state, i.get('character_id') or i.get('player_id'))}：{i['text']}"
+            for i in state.get("player_inputs", [])
         ) or "（开场回合，无玩家行动）"
+        opener = module.opening.narration.strip() if state.get("is_opening") else ""
         opening_line = ""
-        if state.get("is_opening"):
-            opening_line = f"开场设定（请扩写为叙事）：\n{module.opening.narration}\n"
+        if opener:
+            opening_line = ("开场白（原文将直接呈现给玩家，无需你重复或改写；请在它之后衔接叙事）：\n"
+                            f"{opener}\n")
         ending_line = ""
         decision = state.get("decision") or {}
         if decision.get("ending_reached"):
-            try:
+            try:  # 结局收束指令：条件文案即收尾方向（M3-4 起 decision 才会带该字段）
                 ending_line = (f"结局收束（{decision['ending_reached']}）："
                                f"{module.ending(decision['ending_reached']).condition}\n")
             except KeyError:
                 ending_line = ""
+        prev_line = _previous_narration_tail(state, repo)
+        tail_instr = ("请接着开场白写下去（从玩家进入当前场景开始），不要复述开场白。"
+                      if opener else "请输出本回合的完整叙事。")
         user = (
-            f"{opening_line}{ending_line}"
+            f"{opening_line}"
+            f"{ending_line}"
+            f"{prev_line}"
             f"当前场景：{scene.name}\n{scene.description}\n"
             f"玩家行动：\n{inputs_txt}\n"
             f"检定结果：\n{_check_lines(state)}\n"
             f"NPC 反应：\n{_reaction_lines(state, module)}\n"
-            "请输出本回合的完整叙事。"
+            f"{tail_instr}"
         )
         messages = [ChatMessage(role="system", content=NARRATE_SYSTEM),
                     ChatMessage(role="user", content=user)]
         writer = _stream_writer()
         last_error = ""
         for _ in range(2):  # 首次 + repair 重试 1 次（规格 §8）
-            writer({"reset": True})
+            writer({"reset": True})  # 重试时通知消费方清空已呈现内容
+            if opener:  # 开场白代码级置顶保真：流式先发原文，再流模型衔接
+                writer({"speaker": "gm", "text": opener})
             segmenter = IncrementalSegmenter()
             parts: list[str] = []
             try:
@@ -635,10 +645,12 @@ def _stream_writer():
                 raw = "".join(parts)
                 segs = parse_segments(raw)
                 if segs:
-                    return {"narration": raw,
-                            "narration_segments": [{"speaker": s.speaker, "text": s.text}
-                                                   for s in segs],
-                            "error": None}
+                    out_segs = [{"speaker": s.speaker, "text": s.text} for s in segs]
+                    if opener:  # 模组开场白逐字置顶（模型改写不可信，代码级保真）
+                        return {"narration": f"{opener}\n\n{raw}",
+                                "narration_segments": [{"speaker": "gm", "text": opener}] + out_segs,
+                                "error": None}
+                    return {"narration": raw, "narration_segments": out_segs, "error": None}
                 last_error = "empty narration"
             except Exception as exc:
                 last_error = str(exc)
@@ -690,6 +702,8 @@ Expected: PASS —— 新增流式用例 + M2 全部 graph 用例（含 `test_re
 git add backend/app/graph/nodes/gm.py backend/tests/harness/replay.py backend/tests/graph/test_gm_narrate.py
 git commit -m "feat(graph): streaming narrate via custom stream writer with replay support"
 ```
+
+> **交付记录（2026-10-01）**：实现按计划落地；gm_narrate 保留 M2 全部组装结构（`_char_name` 输入、开场白逐字置顶、上一回合结尾锚点），仅将 `chat` 替换为 `chat_stream` + `IncrementalSegmenter` 发射，并新增 ending_line（`decision.ending_reached` → `module.ending().condition`，KeyError 兜底为空）。修正计划草稿两处：① Step 3 草稿丢失 M2 组装细节（inputs_txt 未走 `_char_name`、开场提示词非置顶文案、缺 prev_line/tail_instr 与开场置顶返回逻辑），按“其余组装逻辑不变”以 M2 现状为准；② 流式场景下开场白需在 `reset` 后先行发射（与最终 narration 置顶一致），草稿未覆盖，已补齐。验收：3 例新测试全绿（speaker 标记分块 / 重试双 reset / 结局指令入 prompt），全量 `164 passed, 1 skipped`（含 M2 回放冒烟 `replay.index == 6` 不变）。
 
 ---
 
