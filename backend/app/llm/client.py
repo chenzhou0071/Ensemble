@@ -1,7 +1,7 @@
 """LLM 客户端：按角色分级路由、统一记账；对测试完全可注入。"""
 import time
 from dataclasses import dataclass
-from typing import Callable, Literal, Protocol
+from typing import Callable, Iterator, Literal, Protocol
 
 from pydantic import BaseModel
 
@@ -22,8 +22,16 @@ class ChatResponse(BaseModel):
     tokens_out: int = 0
 
 
+@dataclass
+class StreamUsage:
+    """流式调用的用量累加器：模型实现就地累写，未回 usage 时由 LLMClient 估算。"""
+    tokens_in: int = 0
+    tokens_out: int = 0
+
+
 class ChatModel(Protocol):
     def chat(self, messages: list[ChatMessage]) -> ChatResponse: ...
+    def chat_stream(self, messages: list[ChatMessage], usage: StreamUsage) -> Iterator[str]: ...
 
 
 @dataclass(frozen=True)
@@ -78,6 +86,24 @@ class OpenAICompatModel:
             tokens_in=getattr(usage, "prompt_tokens", 0) or 0,
             tokens_out=getattr(usage, "completion_tokens", 0) or 0,
         )
+
+    def chat_stream(self, messages: list[ChatMessage], usage: StreamUsage) -> Iterator[str]:
+        kwargs = _request_kwargs(self.model, self._enable_thinking, messages)
+        try:
+            stream = self._openai_client().chat.completions.create(
+                **kwargs, stream=True, stream_options={"include_usage": True})
+        except Exception:
+            # 部分兼容端点不认 stream_options：退化为无 usage 流（由 LLMClient 估算）
+            stream = self._openai_client().chat.completions.create(**kwargs, stream=True)
+        for chunk in stream:
+            u = getattr(chunk, "usage", None)
+            if u is not None:
+                usage.tokens_in = getattr(u, "prompt_tokens", 0) or 0
+                usage.tokens_out = getattr(u, "completion_tokens", 0) or 0
+            if getattr(chunk, "choices", None):
+                text = getattr(chunk.choices[0].delta, "content", None)
+                if text:
+                    yield text
 
 
 def _request_kwargs(model: str, enable_thinking: bool,
@@ -148,6 +174,37 @@ class LLMClient:
                                           role, model, resp.tokens_in, resp.tokens_out,
                                           cost, latency_ms)
         return resp.text
+
+    def chat_stream(self, role: Role, messages: list[ChatMessage], ctx: LlmContext,
+                    cheap: bool = False) -> Iterator[str]:
+        """流式输出；流正常结束后记一次账（消费方中途放弃则不记账）。
+
+        与 chat 同规则：调用前经检查点②探针（exceeded 自动降档、paused 拒绝）。
+        """
+        if not cheap and self._budget_probe is not None:
+            level = str(self._budget_probe(ctx))
+            if level == BudgetLevel.PAUSED:
+                raise BudgetPausedError("campaign cost cap reached")
+            if level == BudgetLevel.EXCEEDED:
+                cheap = True
+        model, base_url, api_key = self._resolve(role, cheap)
+        model_obj = self._factory(model, base_url, api_key)
+        usage = StreamUsage()
+        chars = 0
+        start = time.perf_counter()
+        for delta in model_obj.chat_stream(messages, usage):
+            chars += len(delta)
+            yield delta
+        latency_ms = int((time.perf_counter() - start) * 1000)
+        if usage.tokens_in == 0:
+            usage.tokens_in = max(1, sum(len(m.content) for m in messages) // 2)
+        if usage.tokens_out == 0:
+            usage.tokens_out = max(1, chars // 2)
+        cost = compute_cost(self._pricing, model, usage.tokens_in, usage.tokens_out)
+        if self._usage_sink is not None:
+            self._usage_sink.record_usage(ctx.campaign_id, ctx.branch_id, ctx.turn_id,
+                                          role, model, usage.tokens_in, usage.tokens_out,
+                                          cost, latency_ms)
 
     def _resolve(self, role: Role, cheap: bool) -> tuple[str, str | None, str | None]:
         if role == "gm":
