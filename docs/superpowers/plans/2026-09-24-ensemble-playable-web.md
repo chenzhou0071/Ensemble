@@ -130,12 +130,26 @@ ensemble/
 
 `backend/tests/llm/test_stream.py`：
 ```python
+import pytest
+
 from app.config import Pricing, PricingEntry, Settings
-from app.llm.client import ChatMessage, ChatResponse, LLMClient, LlmContext
+from app.llm.client import (BudgetPausedError, ChatMessage, ChatResponse, LLMClient,
+                            LlmContext)
 from app.llm.fakes import FakeLLM
 
 MSGS = [ChatMessage(role="user", content="你好")]
 CTX = LlmContext(campaign_id="c1", branch_id="c1@main", turn_id=1)
+
+class Sink:
+    def __init__(self):
+        self.rows = []
+
+    def record_usage(self, campaign_id, branch_id, turn_id, role, model,
+                     tokens_in, tokens_out, cost_usd, latency_ms) -> None:
+        self.rows.append({"campaign_id": campaign_id, "branch_id": branch_id,
+                          "turn_id": turn_id, "role": role, "model": model,
+                          "tokens_in": tokens_in, "tokens_out": tokens_out,
+                          "cost_usd": cost_usd, "latency_ms": latency_ms})
 
 def make_pricing():
     return Pricing(models={
@@ -143,17 +157,18 @@ def make_pricing():
         "alt-cheap-model": PricingEntry(input_per_1k=0.0003, output_per_1k=0.0006),
     })
 
-def make_client(script):
+def make_client(script, budget_probe=None):
     # gm 用真名；cheap 用虚构名以区分"超限切换"路由（生产两档同名，见 config.py）
     settings = Settings(gm_model="qwen3.8-flash", cheap_model="alt-cheap-model")
-    rows, built = [], {}
+    sink = Sink()
+    built: dict = {}
+
     def factory(model, base_url, api_key):
         built[model] = FakeLLM(list(script))
         return built[model]
-    class Sink:
-        def record_usage(self, *a, **kw):
-            rows.append(kw)
-    return LLMClient(settings, make_pricing(), usage_sink=Sink(), model_factory=factory), built, rows
+
+    return (LLMClient(settings, make_pricing(), usage_sink=sink, model_factory=factory,
+                      budget_probe=budget_probe), built, sink.rows)
 
 def test_stream_joins_to_full_text_and_records_once():
     client, built, rows = make_client(["你好，世界！"])
@@ -176,21 +191,31 @@ def test_stream_usage_estimate_when_provider_silent():
         def chat_stream(self, messages, usage):
             yield "abcd"
             yield "ef"
-    rows = []
-    class Sink:
-        def record_usage(self, *a, **kw):
-            rows.append(kw)
-    client = LLMClient(Settings(), make_pricing(), usage_sink=Sink(),
+    sink = Sink()
+    client = LLMClient(Settings(), make_pricing(), usage_sink=sink,
                        model_factory=lambda *_: SilentModel())
     text = "".join(client.chat_stream("gm", MSGS, CTX))
     assert text == "abcdef"
-    assert rows[0]["tokens_out"] == 3          # 6 字符 // 2
-    assert rows[0]["tokens_in"] >= 1           # 估算兜底
+    assert sink.rows[0]["tokens_out"] == 3          # 6 字符 // 2
+    assert sink.rows[0]["tokens_in"] >= 1           # 估算兜底
 
 def test_stream_chunks_respect_text():
-    client, built, _ = make_client([ChatResponse(text="0123456789", tokens_in=1, tokens_out=2)])
+    client, _, _ = make_client([ChatResponse(text="0123456789", tokens_in=1, tokens_out=2)])
     chunks = list(client.chat_stream("gm", MSGS, CTX))
     assert "".join(chunks) == "0123456789" and len(chunks) == 2   # chunk_size=8
+
+def test_stream_budget_probe_exceeded_switches_to_cheap():
+    """检查点②对流式同样生效：exceeded → 本次流式调用走 cheap 档。"""
+    client, _, rows = make_client(["兜底"], budget_probe=lambda ctx: "exceeded")
+    assert "".join(client.chat_stream("gm", MSGS, CTX)) == "兜底"
+    assert rows[0]["model"] == "alt-cheap-model"
+
+def test_stream_budget_probe_paused_blocks_call():
+    """战役成本触顶：流式调用在开始前被拒绝（不触发模型、不记账）。"""
+    client, built, rows = make_client(["从未被调用"], budget_probe=lambda ctx: "paused")
+    with pytest.raises(BudgetPausedError):
+        list(client.chat_stream("gm", MSGS, CTX))
+    assert rows == [] and "qwen3.8-flash" not in built
 ```
 
 - [ ] **Step 2: 验证失败**
@@ -218,16 +243,16 @@ class ChatModel(Protocol):
     def chat_stream(self, messages: list[ChatMessage], usage: StreamUsage) -> Iterator[str]: ...
 ```
 
-`OpenAICompatModel` 追加方法：
+`OpenAICompatModel` 追加方法（经 `_openai_client()` 懒加载；复用 `_request_kwargs` 保住 qwen 关思考参数）：
 ```python
     def chat_stream(self, messages, usage):
-        payload = {"model": self.model, "messages": [m.model_dump() for m in messages]}
+        kwargs = _request_kwargs(self.model, self._enable_thinking, messages)
         try:
-            stream = self._client.chat.completions.create(
-                **payload, stream=True, stream_options={"include_usage": True})
+            stream = self._openai_client().chat.completions.create(
+                **kwargs, stream=True, stream_options={"include_usage": True})
         except Exception:
             # 部分兼容端点不认 stream_options：退化为无 usage 流（由 LLMClient 估算）
-            stream = self._client.chat.completions.create(**payload, stream=True)
+            stream = self._openai_client().chat.completions.create(**kwargs, stream=True)
         for chunk in stream:
             u = getattr(chunk, "usage", None)
             if u is not None:
@@ -239,11 +264,20 @@ class ChatModel(Protocol):
                     yield text
 ```
 
-`LLMClient` 追加方法（放在 `chat` 之后）：
+`LLMClient` 追加方法（放在 `chat` 之后；与 chat 同规则保留检查点②预算探针）：
 ```python
     def chat_stream(self, role: Role, messages: list[ChatMessage], ctx: LlmContext,
                     cheap: bool = False) -> Iterator[str]:
-        """流式输出；流正常结束后记一次账（消费方中途放弃则不记账）。"""
+        """流式输出；流正常结束后记一次账（消费方中途放弃则不记账）。
+
+        与 chat 同规则：调用前经检查点②探针（exceeded 自动降档、paused 拒绝）。
+        """
+        if not cheap and self._budget_probe is not None:
+            level = str(self._budget_probe(ctx))
+            if level == BudgetLevel.PAUSED:
+                raise BudgetPausedError("campaign cost cap reached")
+            if level == BudgetLevel.EXCEEDED:
+                cheap = True
         model, base_url, api_key = self._resolve(role, cheap)
         model_obj = self._factory(model, base_url, api_key)
         usage = StreamUsage()
@@ -253,8 +287,9 @@ class ChatModel(Protocol):
             chars += len(delta)
             yield delta
         latency_ms = int((time.perf_counter() - start) * 1000)
-        if usage.tokens_in == 0 and usage.tokens_out == 0:
+        if usage.tokens_in == 0:
             usage.tokens_in = max(1, sum(len(m.content) for m in messages) // 2)
+        if usage.tokens_out == 0:
             usage.tokens_out = max(1, chars // 2)
         cost = compute_cost(self._pricing, model, usage.tokens_in, usage.tokens_out)
         if self._usage_sink is not None:
@@ -265,23 +300,25 @@ class ChatModel(Protocol):
 
 - [ ] **Step 4: 修改 fakes.py**
 
-`FakeLLM.__init__` 签名改为 `(self, script, tokens_in=10, tokens_out=20, chunk_size=8)`（保存 `self.chunk_size = chunk_size`）；把现有脚本消耗逻辑抽出为 `_next(self)`：
+`FakeLLM.__init__` 签名改为 `(self, script, tokens_in=10, tokens_out=20, chunk_size=8)`（保存 `self.chunk_size = chunk_size`）；把现有脚本消耗逻辑抽出为 `_next(self)`（保持既有 index 推进语义）：
 
 ```python
     def _next(self):
-        if not self.script:
+        if self.index >= len(self.script):
             raise IndexError("FakeLLM script exhausted")
-        return self.script.pop(0)
+        item = self.script[self.index]
+        self.index += 1
+        return item
 
     def chat(self, messages):
-        self.calls.append(list(messages))
+        self.calls.append(messages)
         item = self._next()
         if isinstance(item, ChatResponse):
             return item
         return ChatResponse(text=item, tokens_in=self.tokens_in, tokens_out=self.tokens_out)
 
     def chat_stream(self, messages, usage):
-        self.calls.append(list(messages))
+        self.calls.append(messages)
         item = self._next()
         if isinstance(item, ChatResponse):
             usage.tokens_in, usage.tokens_out = item.tokens_in, item.tokens_out
@@ -305,6 +342,8 @@ Expected: PASS（新用例 + M2 原有 llm/graph 用例全绿）
 git add backend/app/llm/client.py backend/app/llm/fakes.py backend/tests/llm/test_stream.py
 git commit -m "feat(llm): streaming chat with usage accounting and fake stream support"
 ```
+
+> **交付记录（2026-10-01）**：已按上述修正落地 —— `chat_stream` 复用 `_openai_client()` 与 `_request_kwargs`（懒加载 + qwen 关思考不丢）；保留检查点②预算探针（exceeded 降档 / paused 拒绝，测试补 2 例）；测试 Sink 按位置参数记账；`FakeLLM._next` 维持 index 推进语义。验收：新用例 6 例全绿，全量 `155 passed, 1 skipped`（skip = `--record`）。
 
 ---
 
