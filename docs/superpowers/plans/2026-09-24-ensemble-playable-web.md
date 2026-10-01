@@ -384,17 +384,21 @@ def test_plain_text_streams_immediately():
 
 def test_holdback_only_prefix():
     seg = IncrementalSegmenter()
-    assert seg.feed("他说[") == [("gm", "他说")]
-    assert seg.feed("[不是标记]") == [("gm", "[不是标记]")]
+    assert seg.feed("他说[") == [("gm", "他说")]           # "[" 可能是标记前缀 → 扣留
+    assert seg.feed("[不是标记]") == [("gm", "[[不是标记]")]  # 补全后不是标记 → 全部放出（含扣留的 "["）
 
 def test_multiple_markers_one_chunk():
     out = collect(["[[npc:a]]一[[/npc]]中[[npc:b]]二[[/npc]]尾"])
     assert out == [("npc:a", "一"), ("gm", "中"), ("npc:b", "二"), ("gm", "尾")]
 
-def test_flush_emits_leftover():
+def test_npc_text_emits_before_close_marker():
     seg = IncrementalSegmenter()
-    seg.feed("[[npc:ghost]]说了半句")
-    assert seg.flush() == [("npc:ghost", "说了半句")]
+    assert seg.feed("[[npc:ghost]]说了半句") == [("npc:ghost", "说了半句")]  # 正文增量即出
+
+def test_flush_releases_leftover_buffer():
+    seg = IncrementalSegmenter()
+    assert seg.feed("他说[[npc") == [("gm", "他说")]
+    assert seg.flush() == [("gm", "[[npc")]    # 截断在标记前缀处：残余缓冲兜底放出
     assert seg.flush() == []
 ```
 
@@ -486,6 +490,8 @@ Expected: PASS
 git add backend/app/graph/narrative.py backend/tests/graph/test_incremental.py
 git commit -m "feat(graph): incremental segmenter for streaming narrative"
 ```
+
+> **交付记录（2026-10-01）**：实现按计划原样落地；修正计划草稿中两个测试的期望 —— `test_holdback_only_prefix` 第二跳输出会带上扣留的 `[`（期望 `[[不是标记]`）；`test_flush_emits_leftover` 按规格拆为两例（NPC 正文增量即出：`feed` 即产出；`flush` 兜底放出残余标记前缀）。验收：9 例全绿，全量 `161 passed, 1 skipped`。
 
 ---
 
