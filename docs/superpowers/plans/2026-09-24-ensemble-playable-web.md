@@ -50,12 +50,14 @@ ensemble/
 │   │   │   └── fakes.py               # Task M3-1（FakeLLM.chat_stream）
 │   │   ├── graph/
 │   │   │   ├── state.py               # Task M3-4（ending_reached 字段）
-│   │   │   ├── schemas.py             # Task M3-4（clues_revealed / ending_reached）
+│   │   │   ├── schemas.py             # Task M3-4（clues_revealed / ending_reached）、Task M3-4A（attitude_deltas）
 │   │   │   ├── narrative.py           # Task M3-2（IncrementalSegmenter）
-│   │   │   ├── nodes/gm.py            # Task M3-3（narrate 流式）、Task M3-4（提示词/校验）
-│   │   │   ├── nodes/turn.py          # Task M3-4（post_turn 线索/结局、fallback 清理）
+│   │   │   ├── nodes/gm.py            # Task M3-3（narrate 流式）、Task M3-4（提示词/校验）、Task M3-4A（DECIDE_SYSTEM 态度字段）
+│   │   │   ├── nodes/turn.py          # Task M3-4（post_turn 线索/结局、fallback 清理）、Task M3-4A（态度应用 + attitude 事件）
 │   │   │   ├── main.py                # Task M3-4（结局路由）
 │   │   │   └── fork.py                # Task M3-7（checkpoint 链复制）
+│   │   ├── rules/
+│   │   │   └── attitude.py            # Task M3-4A（好感度硬边界纯函数）
 │   │   └── api/
 │   │       ├── __init__.py            # Task M3-5
 │   │       ├── events.py              # Task M3-8（EventBus）
@@ -71,7 +73,10 @@ ensemble/
 │       ├── graph/test_incremental.py  # Task M3-2
 │       ├── graph/test_gm_narrate.py   # Task M3-3（追加流式用例）
 │       ├── graph/test_endings.py      # Task M3-4
+│       ├── graph/test_attitude.py     # Task M3-4A（post_turn 集成 + 正向链路）
+│       ├── graph/test_gm_decide.py    # Task M3-4A（追加 DECIDE_SYSTEM 断言）
 │       ├── graph/test_fork.py         # Task M3-7
+│       ├── rules/test_attitude.py     # Task M3-4A（纯函数全覆盖）
 │       └── api/
 │           ├── test_campaigns_api.py  # Task M3-5
 │           ├── test_timeline_api.py   # Task M3-6
@@ -954,6 +959,385 @@ Expected: PASS —— 新用例 + M2 全部 graph/cli 用例（validate 的 repa
 ```bash
 git add backend/app/graph backend/app/cli.py backend/tests/graph/test_endings.py
 git commit -m "feat(graph): runtime clue reveal and ending trigger with graph termination"
+```
+
+---
+
+### Task M3-4A: NPC 好感度演化（Phase 1：队伍级，追加任务）
+
+> **来源**：`docs/superpowers/specs/2026-09-26-npc-attitude-evolution-design.md`（2026-10-01 决策并入 M3）。
+> **执行位置**：M3-4 完成之后 —— post_turn 的 module 注入已就位，本任务只做单点追加；**既有回放基线逐字不变是硬验收**。
+
+**Files:**
+- Modify: `backend/app/graph/schemas.py`（新增 AttitudeDelta；GmDecision 加 attitude_deltas）
+- Create: `backend/app/rules/attitude.py`（常量 + 纯函数）
+- Modify: `backend/app/graph/nodes/turn.py`（post_turn 应用 + `attitude` 事件）
+- Modify: `backend/app/graph/nodes/gm.py`（DECIDE_SYSTEM 字段说明）
+- Test: `backend/tests/rules/test_attitude.py`（新建）、`backend/tests/graph/test_attitude.py`（新建）、`backend/tests/graph/test_gm_decide.py`（追加 1 个用例）
+
+**Interfaces:**
+- Consumes: `GmDecision`、`build_post_turn_node(repo, memory, module=None)`（M3-4 形态）、`SqliteRepository.add_event(..., visibility=)`（M2）
+- Produces：
+  - `AttitudeDelta{npc_id: str, delta: int, reason: str = ""}`；`GmDecision.attitude_deltas: list[AttitudeDelta] = Field(default_factory=list)`
+  - `app.rules.attitude`：`MAX_DELTAS_PER_TURN=2`、`MAX_DELTA_ABS=15`、`ATTITUDE_MIN, ATTITUDE_MAX = 0, 100`、`DEFAULT_ATTITUDE=50`；`apply_attitude_deltas(current: dict[str, int], deltas: list[dict] | None, present_npcs: set[str]) -> tuple[dict[str, int], list[dict]]`（纯函数，不抛异常、不修改入参）
+  - 事件契约：`type="attitude"`、`payload={"npc_id","old","new","delta","reason"}`（delta 为截断后净变化）、`visibility="all"`
+  - `post_turn` 返回值：有变更时携带 `"npc_attitudes"`（新表）；无变更 / `module=None` 时不含该键
+
+- [ ] **Step 1: 写失败测试（rules 纯函数全覆盖）**
+
+`backend/tests/rules/test_attitude.py`：
+```python
+from app.rules.attitude import (ATTITUDE_MAX, ATTITUDE_MIN, MAX_DELTA_ABS,
+                                apply_attitude_deltas)
+
+
+def item(npc_id, delta, reason=""):
+    return {"npc_id": npc_id, "delta": delta, "reason": reason}
+
+
+def test_present_only_and_keeps_input_intact():
+    current = {"guard": 40, "barkeep": 60}
+    attitudes, changes = apply_attitude_deltas(
+        current, [item("guard", -10, "被威胁"), item("ghost", 5)], {"guard", "barkeep"})
+    assert attitudes["guard"] == 30 and attitudes["barkeep"] == 60
+    assert current == {"guard": 40, "barkeep": 60}          # 不修改入参
+    assert changes == [{"npc_id": "guard", "old": 40, "new": 30,
+                        "delta": -10, "reason": "被威胁"}]
+
+
+def test_slice_first_two_before_filtering():
+    # 先保序取前 2 条再逐条过滤：非法的第 1 条占掉一个名额（写死语义）
+    attitudes, changes = apply_attitude_deltas(
+        {"a": 50, "b": 50, "c": 50},
+        [item("ghost", 5), item("a", 5), item("b", 5), item("c", 5)], {"a", "b", "c"})
+    assert [c["npc_id"] for c in changes] == ["a"]
+
+
+def test_non_int_delta_dropped():
+    for bad in (True, 3.5, "5", None):
+        attitudes, changes = apply_attitude_deltas({"a": 50}, [item("a", bad)], {"a"})
+        assert changes == [] and attitudes == {"a": 50}
+
+
+def test_non_dict_item_skipped():
+    attitudes, changes = apply_attitude_deltas({"a": 50}, [None, item("a", 5)], {"a"})
+    assert attitudes["a"] == 55 and len(changes) == 1
+
+
+def test_single_delta_truncated_then_merged_net_truncated():
+    attitudes, changes = apply_attitude_deltas({"a": 50}, [item("a", 100)], {"a"})
+    assert attitudes["a"] == 50 + MAX_DELTA_ABS and changes[0]["delta"] == MAX_DELTA_ABS
+    attitudes, changes = apply_attitude_deltas(      # 合并 10+10=20 → 净再截断为 15
+        {"a": 50}, [item("a", 10), item("a", 10)], {"a"})
+    assert attitudes["a"] == 50 + MAX_DELTA_ABS and changes[0]["delta"] == MAX_DELTA_ABS
+
+
+def test_same_npc_merges_and_keeps_first_reason():
+    attitudes, changes = apply_attitude_deltas(
+        {"a": 50}, [item("a", 5, "甲"), item("a", -2, "乙")], {"a"})
+    assert attitudes["a"] == 53 and len(changes) == 1
+    assert changes[0]["reason"] == "甲"
+
+
+def test_clamped_to_bounds_delta_records_truncated_net():
+    attitudes, changes = apply_attitude_deltas({"a": 95}, [item("a", 15)], {"a"})
+    assert attitudes["a"] == ATTITUDE_MAX and changes[0]["delta"] == MAX_DELTA_ABS
+    attitudes, changes = apply_attitude_deltas({"a": 5}, [item("a", -15)], {"a"})
+    assert attitudes["a"] == ATTITUDE_MIN
+
+
+def test_net_zero_or_no_actual_change_records_nothing():
+    attitudes, changes = apply_attitude_deltas(
+        {"a": 50}, [item("a", 5), item("a", -5)], {"a"})   # 净 0
+    assert changes == [] and attitudes == {"a": 50}
+    attitudes, changes = apply_attitude_deltas({"a": 100}, [item("a", 15)], {"a"})  # 卡边
+    assert changes == [] and attitudes == {"a": 100}
+
+
+def test_missing_attitude_defaults_to_50():
+    attitudes, changes = apply_attitude_deltas({}, [item("a", 10)], {"a"})
+    assert attitudes["a"] == 60 and changes[0]["old"] == 50
+
+
+def test_non_list_deltas_treated_as_empty():
+    attitudes, changes = apply_attitude_deltas({"a": 50}, None, {"a"})
+    assert (attitudes, changes) == ({"a": 50}, [])
+```
+
+- [ ] **Step 2: 验证失败**
+
+Run: `cd backend; uv run pytest tests/rules/test_attitude.py -q`
+Expected: FAIL —— `ModuleNotFoundError: No module named 'app.rules.attitude'`
+
+- [ ] **Step 3: 实现 rules 纯函数**
+
+`backend/app/rules/attitude.py`：
+```python
+"""好感度硬边界：纯函数，写死常量；LLM 只说方向与理由，代码决定数值（设计 2026-09-26）。"""
+MAX_DELTAS_PER_TURN = 2            # 保序取前 2 条
+MAX_DELTA_ABS = 15                 # 单条与净变化双重上限
+ATTITUDE_MIN, ATTITUDE_MAX = 0, 100
+DEFAULT_ATTITUDE = 50
+
+
+def _truncate(value: int) -> int:
+    return max(-MAX_DELTA_ABS, min(MAX_DELTA_ABS, value))
+
+
+def apply_attitude_deltas(
+    current: dict[str, int],
+    deltas: list[dict] | None,     # decision["attitude_deltas"] 原始 JSON
+    present_npcs: set[str],        # 当前场景在场 npc_id 集合
+) -> tuple[dict[str, int], list[dict]]:
+    """返回 (新态度表副本, 变更记录)。纯函数：不抛异常、不修改入参、净 0/无变化不动。
+
+    语义（写死）：保序取前 2 条 → 不在场/非 str npc_id 丢弃 → 非 int delta（含 bool）
+    丢弃 → 单条截断到 ±15 → 同 npc 合并求和后净变化再截断 → clamp [0,100] →
+    net==0 或 new==old 不更新不记录；记录取该 npc 首条 reason。
+    """
+    result = dict(current)
+    if not isinstance(deltas, list):
+        return result, []
+    merged: dict[str, int] = {}
+    first_reason: dict[str, str] = {}
+    for entry in deltas[:MAX_DELTAS_PER_TURN]:
+        if not isinstance(entry, dict):
+            continue
+        npc_id, raw = entry.get("npc_id"), entry.get("delta")
+        if not isinstance(npc_id, str) or npc_id not in present_npcs:
+            continue
+        if isinstance(raw, bool) or not isinstance(raw, int):
+            continue
+        merged[npc_id] = merged.get(npc_id, 0) + _truncate(raw)
+        first_reason.setdefault(npc_id, str(entry.get("reason") or ""))
+    changes: list[dict] = []
+    for npc_id, net in merged.items():
+        net = _truncate(net)
+        old = result.get(npc_id, DEFAULT_ATTITUDE)
+        new = max(ATTITUDE_MIN, min(ATTITUDE_MAX, old + net))
+        if net == 0 or new == old:
+            continue
+        result[npc_id] = new
+        changes.append({"npc_id": npc_id, "old": old, "new": new,
+                        "delta": net, "reason": first_reason[npc_id]})
+    return result, changes
+```
+
+Run: `cd backend; uv run pytest tests/rules/test_attitude.py -q`
+Expected: PASS —— 10 用例全绿（截断/合并/在场过滤/非 int/净 0/卡边/默认值/非列表/非 dict 分支全覆盖）
+
+- [ ] **Step 4: 写失败测试（提示词契约 / post_turn 集成 / 正向链路）**
+
+`tests/graph/test_gm_decide.py` 末尾追加：
+```python
+def test_decide_system_documents_attitude_deltas():
+    """好感度契约：LLM 只说方向与理由，数值由代码截断（设计 2026-09-26）。"""
+    assert "attitude_deltas" in DECIDE_SYSTEM
+```
+
+新建 `backend/tests/graph/test_attitude.py`：
+```python
+import json
+
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.types import Command
+
+from app.config import Pricing, PricingEntry, Settings
+from app.graph.main import build_game_graph
+from app.graph.nodes.turn import build_post_turn_node
+from app.llm.client import LLMClient
+from app.llm.fakes import FakeLLM
+from app.llm.usage import BudgetGuard
+from app.memory.journal import JournalMemory
+
+OPENING_DECIDE = ('{"intent_summary": "开场", "checks": [], "proactive_npc_triggers": [],'
+                  ' "scene_transition": null, "memory_queries": []}')
+OPENING_NARR = "雾气贴着地面爬行。"
+THREATEN_DECIDE = ('{"intent_summary": "威胁守卫", "checks": [], "proactive_npc_triggers": [],'
+                   ' "scene_transition": null, "memory_queries": [],'
+                   ' "attitude_deltas": [{"npc_id": "guard", "delta": -10, "reason": "出言威胁"},'
+                   ' {"npc_id": "barkeep", "delta": 5, "reason": "不在场应被丢弃"}]}')
+
+
+class SpyMemory:
+    def update_summaries(self, *args): ...
+
+
+def test_post_turn_applies_present_delta_only(repo, campaign, mini_module):
+    upd = build_post_turn_node(repo, SpyMemory(), mini_module)({
+        "campaign_id": campaign.id, "branch_id": campaign.active_branch_id, "turn_id": 2,
+        "scene_id": "gate", "npc_attitudes": {"guard": 40, "barkeep": 60},
+        "narration": "叙事", "narration_segments": [],
+        "decision": {"attitude_deltas": [{"npc_id": "guard", "delta": -10, "reason": "出言威胁"},
+                                         {"npc_id": "barkeep", "delta": 5, "reason": "不在场"}],
+                     "clues_revealed": [], "ending_reached": None},
+    })
+    assert upd["npc_attitudes"] == {"guard": 30, "barkeep": 60}   # 仅在场者变化，返回值携带新表
+    assert upd["turn_id"] == 3
+    rows = repo.list_events(campaign.id, campaign.active_branch_id, types=["attitude"])
+    assert len(rows) == 1 and rows[0].visibility == "all"
+    assert json.loads(rows[0].payload_json) == {"npc_id": "guard", "old": 40, "new": 30,
+                                                "delta": -10, "reason": "出言威胁"}
+    snap = repo.get_state_at(campaign.id, campaign.active_branch_id, 2)
+    assert snap["npc_attitudes"] == {"guard": 30, "barkeep": 60}  # 快照自动持久化
+
+
+def test_post_turn_invalid_deltas_do_not_break_turn(repo, campaign, mini_module):
+    upd = build_post_turn_node(repo, SpyMemory(), mini_module)({
+        "campaign_id": campaign.id, "branch_id": campaign.active_branch_id, "turn_id": 2,
+        "scene_id": "gate", "npc_attitudes": {"guard": 40},
+        "narration": "", "narration_segments": [],
+        "decision": {"attitude_deltas": [{"npc_id": "ghost", "delta": 5, "reason": "幻觉"},
+                                         {"npc_id": "guard", "delta": "大", "reason": "类型错"}],
+                     "clues_revealed": [], "ending_reached": None},
+    })
+    assert upd["turn_id"] == 3 and "npc_attitudes" not in upd   # 无变更：不携带、无事件、不异常
+    assert repo.list_events(campaign.id, campaign.active_branch_id, types=["attitude"]) == []
+    snap = repo.get_state_at(campaign.id, campaign.active_branch_id, 2)
+    assert snap["npc_attitudes"] == {"guard": 40}
+
+
+def _env(repo, mini_module, script):
+    settings = Settings(gm_model="qwen3.8-flash", cheap_model="qwen3.8-flash",
+                        npc_model="deepseek-flash", extractor_model="qwen3.8-flash")
+    pricing = Pricing(models={
+        "qwen3.8-flash": PricingEntry(input_per_1k=0.000113, output_per_1k=0.00038),
+        "deepseek-flash": PricingEntry(input_per_1k=0.00028, output_per_1k=0.00113)})
+    queues = {m: list(v) for m, v in script.items()}
+    built: list[FakeLLM] = []
+
+    def factory(model, base_url, api_key):
+        items = queues.get(model, [])
+        llm = FakeLLM([items.pop(0)] if items else [])
+        built.append(llm)
+        return llm
+
+    client = LLMClient(settings, pricing, usage_sink=repo, model_factory=factory)
+    graph = build_game_graph(repo, mini_module, JournalMemory(repo), client,
+                             BudgetGuard(settings), MemorySaver())
+    return graph, built
+
+
+def test_attitude_change_reaches_next_turn_prompt(repo, campaign, mini_module):
+    graph, built = _env(repo, mini_module, {"qwen3.8-flash": [
+        OPENING_DECIDE, OPENING_NARR, THREATEN_DECIDE, "守卫冷冷地侧过身。",
+        OPENING_DECIDE, "你看见他攥紧了枪带。"]})
+    branch = repo.get_branch(campaign.active_branch_id)
+    cfg = {"configurable": {"thread_id": repo.thread_id_for(branch)}}
+    graph.invoke({"campaign_id": campaign.id, "branch_id": campaign.active_branch_id,
+                  "turn_id": 0, "player_inputs": []}, cfg)
+    graph.invoke(Command(resume={"turn_id": 1, "inputs": [
+        {"player_id": "p1", "character_id": "pc_1", "text": "我压低声音威胁守卫放行"}],
+        "skipped": []}), cfg)
+    snap = graph.get_state(cfg)
+    assert snap.next == ("wait_input",) and snap.values["npc_attitudes"]["guard"] == 30
+    rows = repo.list_events(campaign.id, campaign.active_branch_id, types=["attitude"])
+    assert len(rows) == 1 and json.loads(rows[0].payload_json)["delta"] == -10
+
+    graph.invoke(Command(resume={"turn_id": 2, "inputs": [
+        {"player_id": "p1", "character_id": "pc_1", "text": "我径直朝酒馆走去"}],
+        "skipped": []}), cfg)
+    assert graph.get_state(cfg).next == ("wait_input",)
+    prompt = built[4].calls[0][1].content        # 第 5 次 qwen 调用 = 回合 2 的 decide
+    assert "当前态度 30" in prompt               # 变化自下一回合起生效
+```
+
+Run: `cd backend; uv run pytest tests/graph/test_attitude.py tests/graph/test_gm_decide.py -q`
+Expected: FAIL —— 集成用例 `KeyError: 'npc_attitudes'`、正向链路 `assert 30 == 40`、提示词契约断言失败；容错用例此时通过（无变更路径与旧行为重合，属预期）
+
+- [ ] **Step 5: 实现 schemas / 提示词 / post_turn 应用**
+
+`schemas.py`：`SceneTransition` 之后、`GmDecision` 之前新增：
+```python
+class AttitudeDelta(BaseModel):
+    npc_id: str
+    delta: int                    # 建议 -15..15；代码最终截断
+    reason: str = ""
+```
+
+`GmDecision` 追加字段：
+```python
+    attitude_deltas: list[AttitudeDelta] = Field(default_factory=list)   # 代码最多取前 2 条
+```
+
+`nodes/gm.py`：`DECIDE_SYSTEM` 在 `'memory_queries(字符串数组)。\n'` 之前插入一行：
+```python
+    'attitude_deltas(数组，元素 {"npc_id","delta"(整数),"reason"}，仅当玩家行为在本回合实质影响了某在场 NPC 对你们的态度时给出，最多 2 条，否则空数组；npc_id 只能用当前场景内列出的；delta 按行为严重程度取 -15..15，拿不准就不给)、'
+```
+
+`nodes/turn.py`：头部 import 追加 `from app.rules.attitude import apply_attitude_deltas`；`build_post_turn_node` 替换为：
+```python
+def build_post_turn_node(repo, memory, module=None):
+    def post_turn(state: GameState) -> dict:
+        campaign_id, branch_id, turn_id = state["campaign_id"], state["branch_id"], state["turn_id"]
+        narration = state.get("narration", "")
+        if narration:
+            repo.add_event(campaign_id, branch_id, turn_id, type="narration",
+                           payload={"text": narration,
+                                    "segments": state.get("narration_segments", [])})
+        decision = state.get("decision") or {}
+        # 场景移动回合：写 scene_changed 技术事件（持久化 + 供前端切换场景与 NPC 区，§4.3）
+        # get_state_at 语义为「≤ turn_id 的最新快照」：本轮快照随后才写入，此刻取到的
+        # 正是 intake 读过的回合初始状态（单写者：生产代码仅本节点写快照）
+        new_scene = state.get("scene_id")
+        old_scene = (repo.get_state_at(campaign_id, branch_id, turn_id) or {}).get("scene_id")
+        if old_scene and new_scene and old_scene != new_scene:
+            transition = decision.get("scene_transition") or {}
+            repo.add_event(campaign_id, branch_id, turn_id, type="scene_changed",
+                           payload={"from_scene": old_scene, "to_scene": new_scene,
+                                    "reason": transition.get("reason") or ""})
+        for clue_id in decision.get("clues_revealed", []):
+            content = ""
+            if module is not None:
+                try:
+                    content = module.clue(clue_id).content
+                except KeyError:
+                    content = ""
+            repo.add_event(campaign_id, branch_id, turn_id, type="clue",
+                           payload={"clue_id": clue_id, "text": content})
+            memory.write_event(campaign_id, branch_id,
+                               MemoryEvent(type="clue", text=content or clue_id,
+                                           turn_id=turn_id))
+        # M3-4A：好感度应用（单点写入；module 未注入时零行为变化）
+        attitudes = state.get("npc_attitudes", {})
+        attitude_upd: dict = {}
+        if module is not None:
+            try:
+                present = set(module.scene(new_scene).npcs)
+                attitudes, changes = apply_attitude_deltas(
+                    attitudes, decision.get("attitude_deltas", []), present)
+                for change in changes:
+                    repo.add_event(campaign_id, branch_id, turn_id, type="attitude",
+                                   payload=change, visibility="all")
+                if changes:
+                    attitude_upd = {"npc_attitudes": attitudes}
+            except Exception:      # 容错（设计 §4）：态度独立于回合成败，异常不更新
+                attitudes = state.get("npc_attitudes", {})
+                attitude_upd = {}
+        repo.append_state(campaign_id, branch_id, turn_id,
+                          {"scene_id": new_scene, "npc_attitudes": attitudes})
+        memory.update_summaries(campaign_id, branch_id, turn_id)
+        return {"turn_id": turn_id + 1, "decision": None,
+                "ending_reached": decision.get("ending_reached"), **attitude_upd}
+
+    return post_turn
+```
+
+- [ ] **Step 6: 跑目标测试**
+
+Run: `cd backend; uv run pytest tests/rules/test_attitude.py tests/graph/test_attitude.py tests/graph/test_gm_decide.py -q`
+Expected: PASS —— 新增用例全绿；`test_gm_decide.py` 既有 7 例不受影响
+
+- [ ] **Step 7: 兼容硬验收（全量回归）**
+
+Run: `cd backend; uv run pytest -q`
+Expected: PASS —— 既有全部用例（含 `tests/graph/test_replay_smoke.py` 回放基线与 `tests/graph/test_post_turn.py` 的 `module=None` 两参调用路径）逐字不变；无 fixture 改动
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add backend/app/rules/attitude.py backend/app/graph/schemas.py backend/app/graph/nodes/turn.py backend/app/graph/nodes/gm.py backend/tests/rules/test_attitude.py backend/tests/graph/test_attitude.py backend/tests/graph/test_gm_decide.py
+git commit -m "feat(graph): NPC attitude evolution with bounded deltas and attitude events"
 ```
 
 ---
