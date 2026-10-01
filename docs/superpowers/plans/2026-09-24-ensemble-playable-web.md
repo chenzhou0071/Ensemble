@@ -1016,9 +1016,11 @@ Expected: PASS —— 新用例 + M2 全部 graph/cli 用例（validate 的 repa
 - [ ] **Step 5: Commit**
 
 ```bash
-git add backend/app/graph backend/app/cli.py backend/tests/graph/test_endings.py
+git add backend/app/graph backend/app/cli.py backend/app/content/schema.py backend/tests/graph/test_endings.py backend/tests/graph/test_gm_decide.py
 git commit -m "feat(graph): runtime clue reveal and ending trigger with graph termination"
 ```
+
+> **交付记录（2026-10-01）**：实现按计划落地（`GmDecision` 两字段、`GameState.ending_reached`、validate 模块引用校验、post_turn 线索事件 + 结局透传、`_route_after_post_turn` 条件边、CLI 结局提示、`Module.clue()` 按草稿预判补齐）。修正计划草稿三处：① 重写后的 validate repair 消息丢失 `DECIDE_SYSTEM`（会破坏既有断言 repair 首条为系统提示的测试），实现保留 system 消息、反馈文案「无法解析」改「不合格」（已确认无测试引用旧文案）；② 草稿循环在 repair 后仍不合格时还会补一次无效调用，改为 `attempt == 1` 即放弃，保证成功/失败路径调用次数与原实现一致；③ 草稿漏了 decide 的 user prompt 注入结局清单 —— GM 首次提名无从得知可用结局 id 与条件（真实模型只能靠 repair 兜底猜中），补「结局条件…：- id：condition」区块（模组无结局时不注入）并加断言测试。验收：新增 7 例（test_endings.py 6 例 + decide 提示词 1 例）全绿，全量 `171 passed, 1 skipped`。
 
 ---
 
