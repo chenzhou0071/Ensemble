@@ -63,18 +63,22 @@ def _route_after_narrate(state: GameState) -> str:
     return "fallback" if state.get("error") else "post_turn"
 
 
+def _route_after_post_turn(state: GameState) -> str:
+    return "end" if state.get("ending_reached") else "wait_input"
+
+
 def build_game_graph(repo, module, memory, client, guard, checkpointer=None):
     g = StateGraph(GameState)
     g.add_node("intake", build_intake_node(repo, module, guard))
     g.add_node("gm_decide", build_decide_node(client, module))
-    g.add_node("validate", build_validate_node(client))
+    g.add_node("validate", build_validate_node(client, module))
     g.add_node("resolve_checks",
                _guarded("resolve_failed", build_resolve_checks_node(repo)))
     g.add_node("apply_transition", build_apply_transition_node(module))
     g.add_node("memory_query", build_memory_query_node(memory))
     g.add_node("npc_respond", build_npc_worker(build_npc_subgraph(client)))
     g.add_node("gm_narrate", build_narrate_node(client, module, repo))
-    g.add_node("post_turn", build_post_turn_node(repo, memory))
+    g.add_node("post_turn", build_post_turn_node(repo, memory, module))
     g.add_node("wait_input", wait_input)
     g.add_node("fallback", fallback)
 
@@ -93,7 +97,8 @@ def build_game_graph(repo, module, memory, client, guard, checkpointer=None):
     g.add_edge("npc_respond", "gm_narrate")   # Send 各分支全部完成后汇合
     g.add_conditional_edges("gm_narrate", _route_after_narrate,
                             {"fallback": "fallback", "post_turn": "post_turn"})
-    g.add_edge("post_turn", "wait_input")
+    g.add_conditional_edges("post_turn", _route_after_post_turn,
+                            {"end": END, "wait_input": "wait_input"})
     g.add_edge("wait_input", "intake")        # interrupt 恢复后开启下一回合
     g.add_edge("fallback", "wait_input")      # 失败不推进：重新收集输入
     return g.compile(checkpointer=checkpointer)

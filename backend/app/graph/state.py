@@ -47,3 +47,4 @@ class GameState(TypedDict, total=False):
     narration_segments: list[dict]
     error: str | None
     degraded: Annotated[dict[str, bool], merge_dict]
+    ending_reached: str | None

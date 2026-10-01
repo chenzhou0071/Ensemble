@@ -87,3 +87,12 @@ def test_decide_llm_error_returns_degraded(campaign, mini_module):
 def test_decide_system_has_fail_forward_rule():
     """社交失败不得让场面停滞（失败前进：可冷淡/回避/暗示，但不能写成拒绝交流）。"""
     assert "不得让场面停滞" in DECIDE_SYSTEM
+
+
+def test_decide_prompt_lists_ending_conditions(campaign, mini_module):
+    """结局清单进 decide 提示词：GM 需知道可收束的结局 id 与条件才能提名。"""
+    client, built, _ = make_client(['{"intent_summary": "x"}'])
+    build_decide_node(client, mini_module)(base_state(campaign))
+    prompt = built["qwen3.8-flash"].calls[0][1].content
+    assert "e1" in prompt and "揭开真相" in prompt   # mini_module 结局 id 与条件
+    assert "ending_reached" in prompt                 # 与字段说明呼应

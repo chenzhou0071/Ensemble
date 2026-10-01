@@ -14,7 +14,10 @@ DECIDE_SYSTEM = (
     'intent_summary(str，一句话概括玩家意图)、'
     'checks(数组，元素 {"actor","skill","difficulty"(regular|hard|extreme)})、'
     'proactive_npc_triggers(数组，元素 {"npc_id","trigger"})、'
-    'scene_transition(null 或 {"to_scene","reason"})、memory_queries(字符串数组)。\n'
+    'scene_transition(null 或 {"to_scene","reason"})、'
+    'clues_revealed(数组，元素为线索 id，仅当本回合玩家明确获得线索时填写)、'
+    'ending_reached(null 或模块给定结局 id，仅当叙事故意收束到结局时填写)、'
+    'memory_queries(字符串数组)。\n'
     "规则：\n"
     "1. checks[].actor 必须用「玩家角色」列表里的角色 id；skill 从该角色卡的技能或属性名中逐字选取\n"
     "2. 只为结果不确定、失败有代价的玩家主动行动要求检定（闲聊、开门等必成动作不要检定）；每回合最多 2 个\n"
@@ -62,12 +65,17 @@ def build_decide_node(client: LLMClient, module) -> Callable[[GameState], dict]:
             f"- {i['player_id']}（角色 {i.get('character_id', '?')}）：{i['text']}"
             for i in state.get("player_inputs", [])
         ) or "（本回合为开场，无玩家行动）"
+        ending_lines = "\n".join(f"- {e.id}：{e.condition}" for e in module.endings)
+        ending_block = (f"结局条件（仅当本回合玩家行动已实质达成某条时，"
+                        f"才允许收束并在 ending_reached 填对应 id）：\n{ending_lines}\n"
+                        if ending_lines else "")
         user = (
             f"当前场景：{scene.name}\n{scene.description}\n"
             f"可去场景：{exit_lines}\n"
             f"在场 NPC：\n{npc_lines}\n"
             f"玩家角色：\n{char_lines}\n"
             f"记忆上下文：\n{state.get('memory_context') or '（无）'}\n"
+            f"{ending_block}"
             f"玩家行动：\n{inputs_txt}"
         )
         try:
@@ -83,27 +91,48 @@ def build_decide_node(client: LLMClient, module) -> Callable[[GameState], dict]:
     return gm_decide
 
 
-def build_validate_node(client: LLMClient) -> Callable[[GameState], dict]:
+def build_validate_node(client: LLMClient, module=None) -> Callable[[GameState], dict]:
+    def _check_refs(decision) -> str | None:
+        if module is None:
+            return None
+        known_clues = {c.id for c in module.clues}
+        unknown = [c for c in decision.clues_revealed if c not in known_clues]
+        if unknown:
+            return f"未知线索 id：{unknown}（可用：{sorted(known_clues)}）"
+        if decision.ending_reached is not None:
+            known_endings = {e.id for e in module.endings}
+            if decision.ending_reached not in known_endings:
+                return f"未知结局 id：{decision.ending_reached}（可用：{sorted(known_endings)}）"
+        return None
+
     def validate_decision(state: GameState) -> dict:
         raw = state.get("decision_raw", "")
-        try:
-            decision = parse_decision_json(raw)
-        except Exception as first_error:
+        repair_msg = ""
+        for attempt in range(2):  # 首次 + repair 重试恰好 1 次（规格 §8）
+            try:
+                decision = parse_decision_json(raw)
+                ref_error = _check_refs(decision)
+                if ref_error is None:
+                    return {"decision": decision.model_dump(mode="json"), "error": None}
+                repair_msg = ref_error
+            except Exception as exc:
+                repair_msg = str(exc)
+            if attempt == 1:
+                break  # repair 后仍不合格：放弃，不再追加调用
             repair = [
                 ChatMessage(role="system", content=DECIDE_SYSTEM),
                 ChatMessage(
                     role="user",
-                    content=(f"你上次的输出无法解析（{first_error}）。"
-                             f"请只输出合法 JSON，字段要求不变。上次输出：\n{raw}"),
-                ),
+                    content=(f"你上次的输出不合格（{repair_msg}）。"
+                             f"请只输出合法 JSON，字段要求不变。上次输出：\n{raw}")),
             ]
             try:
-                fixed = client.chat("gm", repair, _ctx(state), cheap=_cheap(state))
-                decision = parse_decision_json(fixed)
-            except Exception:
-                return {"error": "decision_invalid", "decision": None,
-                        "degraded": {"decision_invalid": True}}
-        return {"decision": decision.model_dump(mode="json"), "error": None}
+                raw = client.chat("gm", repair, _ctx(state), cheap=_cheap(state))
+            except Exception as exc:
+                repair_msg = str(exc)
+                break  # 请求本身失败：无可修复
+        return {"error": "decision_invalid", "decision": None,
+                "degraded": {"decision_invalid": True}}
 
     return validate_decision
 

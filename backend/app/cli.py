@@ -78,7 +78,7 @@ def render_narration(segments: list[dict], module) -> list[str]:
 
 
 def play_loop(graph, config, module, turn_id: int, input_fn, print_fn) -> str:
-    """输入 → 恢复图 → 渲染，循环直到退出或熔断。返回 "quit" 或 "paused"。"""
+    """输入 → 恢复图 → 渲染，循环直到退出/结局/熔断。返回 "quit"/"ended"/"paused"。"""
     while True:
         try:
             text = input_fn(">> ")
@@ -108,6 +108,9 @@ def play_loop(graph, config, module, turn_id: int, input_fn, print_fn) -> str:
 
         for line in render_narration(result.get("narration_segments", []), module):
             print_fn(line)
+        if result.get("ending_reached"):
+            print_fn(f"（结局已达：{result['ending_reached']}）")
+            return "ended"
         if not interrupts:
             print_fn("（图执行结束）")
             return "quit"

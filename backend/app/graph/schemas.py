@@ -26,6 +26,8 @@ class GmDecision(BaseModel):
     proactive_npc_triggers: list[NpcTrigger] = Field(default_factory=list)
     scene_transition: SceneTransition | None = None
     memory_queries: list[str] = Field(default_factory=list)
+    clues_revealed: list[str] = Field(default_factory=list)
+    ending_reached: str | None = None
 
 
 class NpcReaction(BaseModel):

@@ -70,3 +70,9 @@ class Module(BaseModel):
             if e.id == ending_id:
                 return e
         raise KeyError(f"ending not found: {ending_id}")
+
+    def clue(self, clue_id: str) -> Clue:
+        for c in self.clues:
+            if c.id == clue_id:
+                return c
+        raise KeyError(f"clue not found: {clue_id}")

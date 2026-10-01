@@ -2,6 +2,7 @@
 from langgraph.types import interrupt
 
 from app.graph.state import GameState
+from app.memory.base import MemoryEvent
 from app.rules.check import CheckDifficulty, roll_check
 from app.rules.dice import new_seed
 
@@ -51,6 +52,7 @@ def wait_input(state: GameState) -> dict:
         "memory_context": "",
         "error": None,
         "degraded": {},
+        "ending_reached": None,
     }
 
 
@@ -103,7 +105,7 @@ def build_apply_transition_node(module):
     return apply_transition
 
 
-def build_post_turn_node(repo, memory):
+def build_post_turn_node(repo, memory, module=None):
     def post_turn(state: GameState) -> dict:
         campaign_id, branch_id, turn_id = state["campaign_id"], state["branch_id"], state["turn_id"]
         narration = state.get("narration", "")
@@ -111,21 +113,35 @@ def build_post_turn_node(repo, memory):
             repo.add_event(campaign_id, branch_id, turn_id, type="narration",
                            payload={"text": narration,
                                     "segments": state.get("narration_segments", [])})
+        decision = state.get("decision") or {}
         # 场景移动回合：写 scene_changed 技术事件（持久化 + 供前端切换场景与 NPC 区，§4.3）
         # get_state_at 语义为「≤ turn_id 的最新快照」：本轮快照随后才写入，此刻取到的
         # 正是 intake 读过的回合初始状态（单写者：生产代码仅本节点写快照）
         new_scene = state.get("scene_id")
         old_scene = (repo.get_state_at(campaign_id, branch_id, turn_id) or {}).get("scene_id")
         if old_scene and new_scene and old_scene != new_scene:
-            transition = (state.get("decision") or {}).get("scene_transition") or {}
+            transition = decision.get("scene_transition") or {}
             repo.add_event(campaign_id, branch_id, turn_id, type="scene_changed",
                            payload={"from_scene": old_scene, "to_scene": new_scene,
                                     "reason": transition.get("reason") or ""})
+        for clue_id in decision.get("clues_revealed", []):
+            content = ""
+            if module is not None:
+                try:
+                    content = module.clue(clue_id).content
+                except KeyError:
+                    content = ""
+            repo.add_event(campaign_id, branch_id, turn_id, type="clue",
+                           payload={"clue_id": clue_id, "text": content})
+            memory.write_event(campaign_id, branch_id,
+                               MemoryEvent(type="clue", text=content or clue_id,
+                                           turn_id=turn_id))
         repo.append_state(campaign_id, branch_id, turn_id,
                           {"scene_id": new_scene,
                            "npc_attitudes": state.get("npc_attitudes", {})})
         memory.update_summaries(campaign_id, branch_id, turn_id)
-        return {"turn_id": turn_id + 1, "decision": None}
+        return {"turn_id": turn_id + 1, "decision": None,
+                "ending_reached": decision.get("ending_reached")}
 
     return post_turn
 
@@ -135,4 +151,5 @@ def fallback(state: GameState) -> dict:
     return {"player_inputs": [], "decision": None, "decision_raw": "",
             "check_results": [], "npc_reactions": {}, "narration": "",
             "narration_segments": [], "degraded": {},
+            "ending_reached": None,
             "error": state.get("error")}
