@@ -3,7 +3,7 @@ import json
 import re
 from typing import Callable
 
-from app.graph.narrative import parse_segments
+from app.graph.narrative import IncrementalSegmenter, parse_segments
 from app.graph.schemas import parse_decision_json
 from app.graph.state import GameState
 from app.llm.client import ChatMessage, LLMClient, LlmContext
@@ -178,6 +178,15 @@ def _previous_narration_tail(state: GameState, repo) -> str:
     return f"上一回合结尾（仅供承接，不要复述）：…{tail}\n" if tail else ""
 
 
+def _stream_writer():
+    """LangGraph custom stream writer；invoke/CLI 场景返回 no-op（版本差异兜底）。"""
+    try:
+        from langgraph.config import get_stream_writer
+        return get_stream_writer()
+    except Exception:
+        return lambda _payload: None
+
+
 def build_narrate_node(client: LLMClient, module, repo=None) -> Callable[[GameState], dict]:
     def gm_narrate(state: GameState) -> dict:
         scene = module.scene(state["scene_id"])
@@ -190,11 +199,20 @@ def build_narrate_node(client: LLMClient, module, repo=None) -> Callable[[GameSt
         if opener:
             opening_line = ("开场白（原文将直接呈现给玩家，无需你重复或改写；请在它之后衔接叙事）：\n"
                             f"{opener}\n")
+        ending_line = ""
+        decision = state.get("decision") or {}
+        if decision.get("ending_reached"):
+            try:  # 结局收束指令：条件文案即收尾方向（M3-4 起 decision 才会带该字段）
+                ending_line = (f"结局收束（{decision['ending_reached']}）："
+                               f"{module.ending(decision['ending_reached']).condition}\n")
+            except KeyError:
+                ending_line = ""
         prev_line = _previous_narration_tail(state, repo)
         tail_instr = ("请接着开场白写下去（从玩家进入当前场景开始），不要复述开场白。"
                       if opener else "请输出本回合的完整叙事。")
         user = (
             f"{opening_line}"
+            f"{ending_line}"
             f"{prev_line}"
             f"当前场景：{scene.name}\n{scene.description}\n"
             f"玩家行动：\n{inputs_txt}\n"
@@ -204,10 +222,23 @@ def build_narrate_node(client: LLMClient, module, repo=None) -> Callable[[GameSt
         )
         messages = [ChatMessage(role="system", content=NARRATE_SYSTEM),
                     ChatMessage(role="user", content=user)]
+        writer = _stream_writer()
         last_error = ""
         for _ in range(2):  # 首次 + repair 重试 1 次（规格 §8）
+            writer({"reset": True})  # 重试时通知消费方清空已呈现内容
+            if opener:  # 开场白代码级置顶保真：流式先发原文，再流模型衔接
+                writer({"speaker": "gm", "text": opener})
+            segmenter = IncrementalSegmenter()
+            parts: list[str] = []
             try:
-                raw = client.chat("gm", messages, _ctx(state), cheap=_cheap(state))
+                for delta in client.chat_stream("gm", messages, _ctx(state),
+                                                cheap=_cheap(state)):
+                    parts.append(delta)
+                    for speaker, text in segmenter.feed(delta):
+                        writer({"speaker": speaker, "text": text})
+                for speaker, text in segmenter.flush():
+                    writer({"speaker": speaker, "text": text})
+                raw = "".join(parts)
                 segs = parse_segments(raw)
                 if segs:
                     out_segs = [{"speaker": s.speaker, "text": s.text} for s in segs]

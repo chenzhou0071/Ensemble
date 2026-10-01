@@ -34,6 +34,20 @@ class ReplayModels:
                            "messages": [m.model_dump() for m in messages]})
         return ChatResponse(text=entry["text"], tokens_in=10, tokens_out=20)
 
+    def chat_stream(self, messages, usage):
+        if self.index >= len(self.entries):
+            raise IndexError("replay entries exhausted")
+        entry = self.entries[self.index]
+        self.index += 1
+        assert entry["model"] == self._current_model, (
+            f"回放顺序错位：录制为 {entry['model']}，本次请求路由到 {self._current_model}")
+        self.calls.append({"model": self._current_model,
+                           "messages": [m.model_dump() for m in messages]})
+        usage.tokens_in, usage.tokens_out = 10, 20
+        text = entry["text"]
+        for i in range(0, len(text), 8):
+            yield text[i:i + 8]
+
 
 def load_turn(path: str | Path) -> dict:
     return json.loads(Path(path).read_text(encoding="utf-8"))
@@ -67,6 +81,13 @@ def make_recording_factory(inner_factory, collected: list[dict]):
                 resp = inner.chat(messages)
                 collected.append({"model": model, "text": resp.text})
                 return resp
+
+            def chat_stream(self, messages, usage):
+                text = ""
+                for delta in inner.chat_stream(messages, usage):
+                    text += delta
+                    yield delta
+                collected.append({"model": model, "text": text})
 
         return _RecordingModel()
 

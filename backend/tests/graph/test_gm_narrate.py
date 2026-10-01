@@ -1,5 +1,8 @@
+from langgraph.graph import END, START, StateGraph
+
 from app.config import Pricing, PricingEntry, Settings
 from app.graph.nodes.gm import build_narrate_node
+from app.graph.state import GameState
 from app.llm.client import LLMClient
 
 def make_client(script):
@@ -102,3 +105,52 @@ def test_cheap_model_when_exceeded(campaign, mini_module):
     client, built = make_client(["开场叙事。"])
     build_narrate_node(client, mini_module)(base_state(campaign, budget_level="exceeded"))
     assert "alt-cheap-model" in built and "qwen3.8-flash" not in built
+
+
+def stream_chunks(node, state):
+    g = StateGraph(GameState)
+    g.add_node("gm_narrate", node)
+    g.add_edge(START, "gm_narrate")
+    g.add_edge("gm_narrate", END)
+    app = g.compile()
+    return [c for c in app.stream(state, stream_mode="custom")]
+
+
+def merge_speakers(chunks):
+    merged = []
+    for c in chunks:
+        if c.get("reset"):
+            continue
+        if merged and merged[-1][0] == c["speaker"]:
+            merged[-1][1] += c["text"]
+        else:
+            merged.append([c["speaker"], c["text"]])
+    return merged
+
+
+def test_narrate_streams_speaker_tagged_chunks(campaign, mini_module):
+    client, built = make_client(["你推开门。[[npc:guard]]站住！[[/npc]]他警惕地盯着你。"])
+    chunks = stream_chunks(build_narrate_node(client, mini_module), base_state(campaign))
+    assert chunks[0] == {"reset": True}
+    merged = merge_speakers(chunks)
+    assert [s for s, _ in merged] == ["gm", "npc:guard", "gm"]
+    assert "".join(t for _, t in merged) == "你推开门。站住！他警惕地盯着你。"
+
+
+def test_narrate_streams_reset_on_retry(campaign, mini_module):
+    client, built = make_client(["", "补上的有效叙事。"])
+    chunks = stream_chunks(build_narrate_node(client, mini_module), base_state(campaign))
+    resets = [c for c in chunks if c.get("reset")]
+    assert len(resets) == 2                       # 首次尝试 + repair 尝试各一次
+    merged = merge_speakers(chunks)
+    assert "".join(t for _, t in merged) == "补上的有效叙事。"
+
+
+def test_ending_instruction_in_prompt(campaign, mini_module):
+    client, built = make_client(["结局叙事。"])
+    state = base_state(campaign, decision={"ending_reached": "e1", "checks": [],
+                                           "clues_revealed": [], "proactive_npc_triggers": [],
+                                           "scene_transition": None, "memory_queries": []})
+    build_narrate_node(client, mini_module)(state)
+    prompt = built["qwen3.8-flash"].calls[0][1].content
+    assert "揭开真相" in prompt                    # mini_module 结局 e1 的 condition
