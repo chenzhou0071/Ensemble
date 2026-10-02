@@ -248,3 +248,25 @@ class SqliteRepository:
             upto = chain[i + 1].fork_turn_id if i + 1 < len(chain) else None
             out.extend(self.list_events(campaign_id, b.id, upto_turn=upto))
         return out
+
+    # ---------- fork ----------
+
+    def copy_branch_state(self, campaign_id: str, src_branch_id: str,
+                          dst_branch_id: str, upto_turn: int) -> None:
+        """分叉：把源分支 ≤ upto_turn 的 L2 行原样复制到目标分支（usage 不复制）。"""
+        with Session(self.engine) as s:
+            for model, turn_attr in ((GameEventRow, "turn_id"), (StateSnapshotRow, "turn_id"),
+                                     (CharacterStateRow, "turn_id"), (DiceRecordRow, "turn_id")):
+                q = select(model).where(model.branch_id == src_branch_id,
+                                        getattr(model, turn_attr) <= upto_turn)
+                for row in s.exec(q).all():
+                    data = row.model_dump()
+                    data.pop("id", None)
+                    data["branch_id"] = dst_branch_id
+                    s.add(model(**data))
+            q = (select(SummaryRow).where(SummaryRow.branch_id == src_branch_id,
+                                          SummaryRow.upto_turn <= upto_turn))
+            for row in s.exec(q).all():
+                s.add(SummaryRow(campaign_id=campaign_id, branch_id=dst_branch_id,
+                                 upto_turn=row.upto_turn, content=row.content))
+            s.commit()

@@ -124,3 +124,32 @@ async def switch_branch(campaign_id: str, req: SwitchBranchRequest, request: Req
     if deps.manager is not None:
         await deps.manager.on_branch_switch(campaign_id)
     return {"active_branch_id": req.branch_id}
+
+
+class RestoreRequest(BaseModel):
+    turn_id: int
+
+
+@router.post("/campaigns/{campaign_id}/restore")
+async def restore_campaign(campaign_id: str, req: RestoreRequest, request: Request):
+    import uuid as _uuid
+    from app.graph.fork import fork_thread
+    deps = _deps(request)
+    try:
+        campaign = deps.repo.get_campaign(campaign_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="campaign not found")
+    src = campaign.active_branch_id
+    name = f"rollback-{req.turn_id}-{_uuid.uuid4().hex[:4]}"
+    dst = f"{campaign_id}@{name}"
+    try:
+        fork_thread(deps.settings.sqlite_path, src, dst, upto_turn=req.turn_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    deps.repo.copy_branch_state(campaign_id, src, dst, req.turn_id)
+    deps.repo.create_branch(campaign_id, name, fork_turn_id=req.turn_id,
+                            parent_branch_id=src)
+    deps.repo.switch_branch(campaign_id, dst)
+    if deps.manager is not None:
+        await deps.manager.on_branch_switch(campaign_id)
+    return {"branch_id": dst, "name": name}
