@@ -1554,8 +1554,6 @@ from pathlib import Path
 
 import yaml
 
-from app.content.loader import load_module
-
 
 def _iter_module_files(modules_dir: str):
     return sorted(Path(modules_dir).glob("*.yaml"))
@@ -1578,7 +1576,6 @@ def find_module_path(modules_dir: str, module_id: str) -> Path:
             return p
     raise KeyError(f"module not found: {module_id}")
 ```
-（`load_module` 的 import 供调用方 `load_module(find_module_path(...))` 使用；若 lint 报未用，保留 import 并在 routes 中以 `registry.find_module_path` + `load_module` 组合使用。）
 
 `repo.py` 追加（events 区块之后）：
 ```python
@@ -1706,6 +1703,7 @@ def list_campaigns(request: Request):
     from sqlmodel import Session, select
     with Session(repo.engine) as s:
         rows = s.exec(select(Campaign).order_by(Campaign.created_at.desc())).all()
+    out = []
     for c in rows:
         out.append({"id": c.id, "title": c.title, "module_id": c.module_id,
                     "active_branch_id": c.active_branch_id,
@@ -1754,9 +1752,11 @@ Expected: PASS
 - [ ] **Step 6: Commit**
 
 ```bash
-git add backend/pyproject.toml backend/app/config.py backend/app/content/registry.py backend/app/storage/repo.py backend/app/api backend/tests/content/test_registry.py backend/tests/storage/test_players.py backend/tests/api
+git add backend/pyproject.toml backend/uv.lock backend/app/config.py backend/app/content/registry.py backend/app/storage/repo.py backend/app/api backend/tests/content/test_registry.py backend/tests/storage/test_players.py backend/tests/api
 git commit -m "feat(api): module registry, player repository, campaign REST endpoints"
 ```
+
+> **交付记录（2026-10-02）**：实现按计划落地（registry 扫描/查找、players 4 方法 + `latest_snapshot`、`AppDeps`/`create_app` + 4 端点 + `/healthz`、Settings 4 字段 + `cors_origin_list` property + 2 env）。修正计划草稿三处：① `list_campaigns` 示例中 `out` 未初始化——补 `out = []`；② registry.py 省略未用的 `load_module` import（由 routes 组合使用，本文件不引入）；③ Step 6 `git add` 补 `backend/uv.lock`（依赖锁定随提交）。验收：新增 8 例先红后绿（registry 2 / players 1 / API 5），目标组 `34 passed`，全量 `193 passed, 1 skipped`。
 
 ---
 
