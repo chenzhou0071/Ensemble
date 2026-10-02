@@ -1765,6 +1765,8 @@ git commit -m "feat(api): module registry, player repository, campaign REST endp
 **Files:**
 - Modify: `backend/app/storage/repo.py`（`branch_turn_count`）
 - Modify: `backend/app/api/routes.py`（两个端点）
+- Create: `backend/tests/api/conftest.py`（`client` fixture 自 `test_campaigns_api.py` 移入共享）
+- Modify: `backend/tests/api/test_campaigns_api.py`（删除本地 fixture 副本）
 - Test: `backend/tests/api/test_timeline_api.py`
 
 **Interfaces:**
@@ -1778,14 +1780,14 @@ git commit -m "feat(api): module registry, player repository, campaign REST endp
 
 `backend/tests/api/test_timeline_api.py`：
 ```python
-def _mk(client, repo, title="时间线"):
+def _mk(client, title="时间线"):
     cid = client.post("/api/campaigns", json={"module_id": "misty_hollow",
                                               "title": title}).json()["campaign_id"]
     return cid
 
 def test_timeline_lists_branches_with_counts(client):
     c, repo = client
-    cid = _mk(c, repo)
+    cid = _mk(c)
     cemp = repo.get_campaign(cid)
     for t in range(3):
         repo.append_state(cid, cemp.active_branch_id, t, {"scene_id": "square",
@@ -1796,7 +1798,7 @@ def test_timeline_lists_branches_with_counts(client):
 
 def test_switch_branch(client):
     c, repo = client
-    cid = _mk(c, repo)
+    cid = _mk(c)
     camp = repo.get_campaign(cid)
     b2 = repo.create_branch(cid, "alt", fork_turn_id=0, parent_branch_id=camp.active_branch_id)
     r = c.post(f"/api/campaigns/{cid}/switch", json={"branch_id": b2.id})
@@ -1805,7 +1807,7 @@ def test_switch_branch(client):
 
 def test_switch_rejects_foreign_branch(client):
     c, repo = client
-    cid1, cid2 = _mk(c, repo, "甲"), _mk(c, repo, "乙")
+    cid1, cid2 = _mk(c, "甲"), _mk(c, "乙")
     b_foreign = repo.get_campaign(cid2).active_branch_id
     r = c.post(f"/api/campaigns/{cid1}/switch", json={"branch_id": b_foreign})
     assert r.status_code == 400
@@ -1873,9 +1875,11 @@ Expected: PASS
 - [ ] **Step 5: Commit**
 
 ```bash
-git add backend/app/storage/repo.py backend/app/api/routes.py backend/tests/api/test_timeline_api.py
+git add backend/app/storage/repo.py backend/app/api/routes.py backend/tests/api/test_timeline_api.py backend/tests/api/conftest.py backend/tests/api/test_campaigns_api.py
 git commit -m "feat(api): branch timeline and switch endpoints"
 ```
+
+> **交付记录（2026-10-02）**：实现按计划落地（`branch_turn_count` 口径 = 最新快照 `turn_id + 1`；`timeline` / `switch` 端点；外部分支 400；`manager.on_branch_switch` 钩子为 T10 预留）。修正计划草稿两处：① `client` fixture 原私有于 `test_campaigns_api.py`，新测试跨文件引用会 fixture not found —— 抽出 `tests/api/conftest.py` 共享（`test_campaigns_api.py` 删除本地副本，Step 5 `git add` 已同步）；② `_mk` helper 去掉未用的 `repo` 参数。验收：新增 3 例先红后绿（404 路由未定义 → 全绿），`tests/api` 8 passed，全量 `196 passed, 1 skipped`。
 
 ---
 
