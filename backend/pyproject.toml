@@ -5,13 +5,14 @@ requires-python = ">=3.12"
 dependencies = [
   "langgraph", "langgraph-checkpoint-sqlite",
   "pydantic>=2", "pyyaml", "sqlmodel", "openai",
+  "fastapi", "uvicorn[standard]",
 ]
 
 [project.scripts]
 ensemble = "app.cli:main"
 
 [dependency-groups]
-dev = ["pytest", "pytest-cov"]
+dev = ["pytest", "pytest-cov", "httpx", "pytest-asyncio"]
 
 [build-system]
 requires = ["hatchling"]

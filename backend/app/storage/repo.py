@@ -1,11 +1,12 @@
 """L2 领域仓储：append-only、版本化、分支隔离。"""
 import json
+import secrets
 import uuid
 
 from sqlmodel import Session, select
 
 from app.storage.models import (Branch, Campaign, CharacterStateRow, DiceRecordRow,
-                                GameEventRow, StateSnapshotRow, SummaryRow, UsageRow)
+                                GameEventRow, Player, StateSnapshotRow, SummaryRow, UsageRow)
 
 
 class SqliteRepository:
@@ -87,6 +88,35 @@ class SqliteRepository:
         q = q.order_by(GameEventRow.seq)
         with Session(self.engine) as s:
             return list(s.exec(q).all())
+
+    # ---------- players ----------
+
+    def add_player(self, campaign_id: str, display_name: str) -> Player:
+        player = Player(id=uuid.uuid4().hex[:12], campaign_id=campaign_id,
+                        display_name=display_name, join_token=secrets.token_urlsafe(8))
+        with Session(self.engine) as s:
+            s.add(player)
+            s.commit()
+            s.refresh(player)
+        return player
+
+    def list_players(self, campaign_id: str) -> list[Player]:
+        with Session(self.engine) as s:
+            return list(s.exec(select(Player).where(Player.campaign_id == campaign_id)).all())
+
+    def get_player(self, player_id: str) -> Player | None:
+        with Session(self.engine) as s:
+            return s.get(Player, player_id)
+
+    def get_player_by_token(self, join_token: str) -> Player | None:
+        with Session(self.engine) as s:
+            return s.exec(select(Player).where(Player.join_token == join_token)).first()
+
+    def latest_snapshot(self, campaign_id: str, branch_id: str) -> StateSnapshotRow | None:
+        q = (select(StateSnapshotRow).where(StateSnapshotRow.branch_id == branch_id)
+             .order_by(StateSnapshotRow.turn_id.desc(), StateSnapshotRow.id.desc()))
+        with Session(self.engine) as s:
+            return s.exec(q).first()
 
     # ---------- versioned state ----------
 
