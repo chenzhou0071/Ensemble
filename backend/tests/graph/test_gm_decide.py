@@ -96,3 +96,8 @@ def test_decide_prompt_lists_ending_conditions(campaign, mini_module):
     prompt = built["qwen3.8-flash"].calls[0][1].content
     assert "e1" in prompt and "揭开真相" in prompt   # mini_module 结局 id 与条件
     assert "ending_reached" in prompt                 # 与字段说明呼应
+
+
+def test_decide_system_documents_attitude_deltas():
+    """好感度契约：LLM 只说方向与理由，数值由代码截断（设计 2026-09-26）。"""
+    assert "attitude_deltas" in DECIDE_SYSTEM

@@ -3,6 +3,7 @@ from langgraph.types import interrupt
 
 from app.graph.state import GameState
 from app.memory.base import MemoryEvent
+from app.rules.attitude import apply_attitude_deltas
 from app.rules.check import CheckDifficulty, roll_check
 from app.rules.dice import new_seed
 
@@ -136,12 +137,27 @@ def build_post_turn_node(repo, memory, module=None):
             memory.write_event(campaign_id, branch_id,
                                MemoryEvent(type="clue", text=content or clue_id,
                                            turn_id=turn_id))
+        # M3-4A：好感度应用（单点写入；module 未注入时零行为变化）
+        attitudes = state.get("npc_attitudes", {})
+        attitude_upd: dict = {}
+        if module is not None:
+            try:
+                present = set(module.scene(new_scene).npcs)
+                attitudes, changes = apply_attitude_deltas(
+                    attitudes, decision.get("attitude_deltas", []), present)
+                for change in changes:
+                    repo.add_event(campaign_id, branch_id, turn_id, type="attitude",
+                                   payload=change, visibility="all")
+                if changes:
+                    attitude_upd = {"npc_attitudes": attitudes}
+            except Exception:      # 容错（设计 §4）：态度独立于回合成败，异常不更新
+                attitudes = state.get("npc_attitudes", {})
+                attitude_upd = {}
         repo.append_state(campaign_id, branch_id, turn_id,
-                          {"scene_id": new_scene,
-                           "npc_attitudes": state.get("npc_attitudes", {})})
+                          {"scene_id": new_scene, "npc_attitudes": attitudes})
         memory.update_summaries(campaign_id, branch_id, turn_id)
         return {"turn_id": turn_id + 1, "decision": None,
-                "ending_reached": decision.get("ending_reached")}
+                "ending_reached": decision.get("ending_reached"), **attitude_upd}
 
     return post_turn
 

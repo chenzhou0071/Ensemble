@@ -20,6 +20,12 @@ class SceneTransition(BaseModel):
     reason: str = ""
 
 
+class AttitudeDelta(BaseModel):
+    npc_id: str
+    delta: int                    # 建议 -15..15；代码最终截断
+    reason: str = ""
+
+
 class GmDecision(BaseModel):
     intent_summary: str = ""
     checks: list[CheckRequest] = Field(default_factory=list)
@@ -28,6 +34,7 @@ class GmDecision(BaseModel):
     memory_queries: list[str] = Field(default_factory=list)
     clues_revealed: list[str] = Field(default_factory=list)
     ending_reached: str | None = None
+    attitude_deltas: list[AttitudeDelta] = Field(default_factory=list)   # 代码最多取前 2 条
 
 
 class NpcReaction(BaseModel):

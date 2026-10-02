@@ -17,6 +17,7 @@ DECIDE_SYSTEM = (
     'scene_transition(null 或 {"to_scene","reason"})、'
     'clues_revealed(数组，元素为线索 id，仅当本回合玩家明确获得线索时填写)、'
     'ending_reached(null 或模块给定结局 id，仅当叙事故意收束到结局时填写)、'
+    'attitude_deltas(数组，元素 {"npc_id","delta"(整数),"reason"}，仅当玩家行为在本回合实质影响了某在场 NPC 对你们的态度时给出，最多 2 条，否则空数组；npc_id 只能用当前场景内列出的；delta 按行为严重程度取 -15..15，拿不准就不给)、'
     'memory_queries(字符串数组)。\n'
     "规则：\n"
     "1. checks[].actor 必须用「玩家角色」列表里的角色 id；skill 从该角色卡的技能或属性名中逐字选取\n"
