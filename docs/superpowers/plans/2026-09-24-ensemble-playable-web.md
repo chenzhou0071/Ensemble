@@ -1919,8 +1919,12 @@ from app.storage.repo import SqliteRepository
 
 OPENING = ('{"intent_summary": "开场", "checks": [], "proactive_npc_triggers": [],'
            ' "scene_transition": null, "memory_queries": []}')
+TRIGGER = ('{"intent_summary": "问守卫", "checks": [],'
+           ' "proactive_npc_triggers": [{"npc_id": "guard", "trigger": "玩家搭话"}],'
+           ' "scene_transition": null, "memory_queries": []}')
 PLAIN = ('{"intent_summary": "继续", "checks": [], "proactive_npc_triggers": [],'
          ' "scene_transition": null, "memory_queries": []}')
+GUARD_REPLY = '{"speech": "别乱走。", "action": "按着枪套"}'
 
 def _env(tmp_path, script):
     db = str(tmp_path / "fork.db")
@@ -1948,19 +1952,23 @@ def _mini():
     return Module.model_validate({
         "meta": {"id": "mini", "title": "迷你"},
         "opening": {"narration": "开场叙述", "scene_id": "gate"},
-        "scenes": [{"id": "gate", "name": "村口", "npcs": [], "exits": []}],
-        "npcs": [], "clues": [],
+        "scenes": [{"id": "gate", "name": "村口", "npcs": ["guard"], "exits": []}],
+        "npcs": [{"id": "guard", "name": "王守卫", "persona": "多疑的老兵",
+                  "initial_attitude": 40}],
+        "clues": [],
         "endings": [{"id": "e1", "scene": "gate", "condition": "真相大白"}]})
 
 def test_fork_copies_chain_and_strands_at_boundary(tmp_path):
-    db, repo, campaign, graph, settings = _env(tmp_path, {"qwen3.8-flash": [
-        OPENING, "开场叙事。", PLAIN, "第二回合叙事。"]})
+    db, repo, campaign, graph, settings = _env(tmp_path, {
+        "qwen3.8-flash": [OPENING, "开场叙事。", TRIGGER, "守卫的反应。",
+                          PLAIN, "新分支叙事。"],
+        "deepseek-flash": [GUARD_REPLY]})
     cfg = {"configurable": {"thread_id": campaign.active_branch_id}}
     graph.invoke({"campaign_id": campaign.id, "branch_id": campaign.active_branch_id,
                   "turn_id": 0, "player_inputs": []}, cfg)
     graph.invoke(Command(resume={"turn_id": 1,
                                  "inputs": [{"player_id": "p1", "character_id": "pc_p1",
-                                             "text": "继续"}], "skipped": []}), cfg)
+                                             "text": "跟守卫搭话"}], "skipped": []}), cfg)
     assert graph.get_state(cfg).values["turn_id"] == 2   # 已完成 turn 0 与 turn 1
 
     dst = f"{campaign.id}@rollback"
@@ -1978,6 +1986,7 @@ def test_fork_copies_chain_and_strands_at_boundary(tmp_path):
                                   update={"branch_id": dst}),
                           {"configurable": {"thread_id": dst}})
     assert result.get("__interrupt__"), "fork 后可继续回合"
+    assert result["turn_id"] == 3                        # 新回合完整跑完
 
 def test_fork_missing_boundary_raises(tmp_path):
     import pytest
@@ -2015,16 +2024,25 @@ Expected: FAIL —— `ModuleNotFoundError: No module named 'app.graph.fork'`
 实现要点：不做反序列化、原样复制 rows。挂起点判定 = 该 checkpoint 存在
 `__interrupt__` 写（langgraph 把 interrupt 存为 reserved 通道的 write）。
 第 k 个挂起点（从最旧数起，1-based）= 第 k-1 个回合结束后的 wait_input 挂起。
+
+M3-7 探测事实（langgraph-checkpoint-sqlite 3.1.1）：
+- 同一 thread 上子图（Send 并行）会写入 `checkpoint_ns` 非空的行，必须只沿
+  主图链（`checkpoint_ns = ''`）上溯，否则链会断裂/混入；
+- 主图链为单链（单 root、无分叉 parent）；
+- 库中尚无 checkpoint 表（从未跑过图）按"无 checkpoint"处理。
 """
 import sqlite3
 
 
 def _chain(db_path: str, thread_id: str) -> list[str]:
-    """按从旧到新返回该 thread 的 checkpoint 链（沿 parent_checkpoint_id 上溯）。"""
+    """按从旧到新返回主图（checkpoint_ns=''）的 checkpoint 链（沿 parent 上溯）。"""
     with sqlite3.connect(db_path) as conn:
-        rows = conn.execute(
-            "SELECT checkpoint_id, parent_checkpoint_id FROM checkpoints "
-            "WHERE thread_id = ?", (thread_id,)).fetchall()
+        try:
+            rows = conn.execute(
+                "SELECT checkpoint_id, parent_checkpoint_id FROM checkpoints "
+                "WHERE thread_id = ? AND checkpoint_ns = ''", (thread_id,)).fetchall()
+        except sqlite3.OperationalError:      # 表不存在 = 从未跑图
+            return []
     parents = {cid: pid for cid, pid in rows}
     children = {pid: cid for cid, pid in rows if pid}
     roots = [cid for cid, pid in rows if not pid or pid not in parents]
@@ -2044,7 +2062,8 @@ def fork_thread(db_path: str, src_thread: str, dst_thread: str, upto_turn: int) 
     with sqlite3.connect(db_path) as conn:
         parked = {cid for (cid,) in conn.execute(
             "SELECT DISTINCT checkpoint_id FROM writes "
-            "WHERE thread_id = ? AND channel = '__interrupt__'", (src_thread,)).fetchall()}
+            "WHERE thread_id = ? AND checkpoint_ns = '' AND channel = '__interrupt__'",
+            (src_thread,)).fetchall()}
         ordered_parked = [cid for cid in chain if cid in parked]
         if len(ordered_parked) <= upto_turn:
             raise ValueError(
@@ -2057,7 +2076,8 @@ def fork_thread(db_path: str, src_thread: str, dst_thread: str, upto_turn: int) 
             cols = [r[1] for r in conn.execute(f"PRAGMA table_info({table})")]
             marks = ",".join("?" for _ in cols)
             sel = (f"SELECT {','.join(cols)} FROM {table} "
-                   f"WHERE thread_id = ? AND checkpoint_id IN ({','.join('?' for _ in copy_ids)})")
+                   f"WHERE thread_id = ? AND checkpoint_ns = '' "
+                   f"AND checkpoint_id IN ({','.join('?' for _ in copy_ids)})")
             rows = conn.execute(sel, [src_thread, *copy_ids]).fetchall()
             ins = f"INSERT OR REPLACE INTO {table} ({','.join(cols)}) VALUES ({marks})"
             for row in rows:
@@ -2136,6 +2156,8 @@ Expected: PASS
 git add backend/app/graph/fork.py backend/app/storage/repo.py backend/app/api/routes.py backend/tests/graph/test_fork.py backend/tests/api/test_restore_api.py
 git commit -m "feat(api): branch restore with L2 copy and checkpoint chain fork"
 ```
+
+> **交付记录（2026-10-02）**：取证先行（临时脚本跑真图 dump 数据库 + 手动 fork 预演）——`langgraph-checkpoint-sqlite 3.1.1` 的 `checkpoints`/`writes` 双表结构、主图链（`checkpoint_ns=''`）为单链（单 root、无分叉 parent）、有序挂起点定位、`Command(resume=..., update=...)` 恢复新回合均实测通过。修正计划草稿三处：① 子图（Send 并行）会写入 `checkpoint_ns` 非空的行 —— `_chain` / 挂起点查询 / 复制 SELECT 三处均加 `checkpoint_ns = ''` 过滤（否则链断裂/混入）；② 从未跑过图的库无 `checkpoints` 表 —— `_chain` 捕获 `OperationalError` 返回 `[]`（否则测试环境 500 而非计划预期的 400）；③ 测试增强：首回合触发 NPC（覆盖子图 ns 场景）、fork 后 resume 断言 `turn_id == 3`（原用例在空脚本下 `__interrupt__` 断言会因 fallback 路径假通过）。验收：新增 3 例先红后绿（fork 2 / restore 1），目标组（graph+api+cli）`107 passed`，全量 `199 passed, 1 skipped`。
 
 ---
 
