@@ -139,6 +139,13 @@ class SqliteRepository:
             row = s.exec(q).first()
         return json.loads(row.data_json) if row else None
 
+    def branch_turn_count(self, branch_id: str) -> int:
+        q = (select(StateSnapshotRow).where(StateSnapshotRow.branch_id == branch_id)
+             .order_by(StateSnapshotRow.turn_id.desc()))
+        with Session(self.engine) as s:
+            row = s.exec(q).first()
+        return (row.turn_id + 1) if row else 0
+
     def append_character(self, campaign_id: str, branch_id: str, turn_id: int,
                          character_id: str, data: dict) -> None:
         with Session(self.engine) as s:

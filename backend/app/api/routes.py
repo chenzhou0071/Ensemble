@@ -89,3 +89,38 @@ def get_campaign(campaign_id: str, request: Request):
             "scene_id": scene_id, "turn_id": turn_id,
             "cost_usd": repo.campaign_cost_total(campaign_id),
             "players": players, "characters": characters, "clues_revealed": clues}
+
+
+class SwitchBranchRequest(BaseModel):
+    branch_id: str
+
+
+@router.get("/campaigns/{campaign_id}/timeline")
+def timeline(campaign_id: str, request: Request):
+    repo = _deps(request).repo
+    try:
+        campaign = repo.get_campaign(campaign_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="campaign not found")
+    branches = [{"id": b.id, "name": b.name, "parent_branch_id": b.parent_branch_id,
+                 "fork_turn_id": b.fork_turn_id,
+                 "completed_turns": repo.branch_turn_count(b.id),
+                 "created_at": b.created_at.isoformat()}
+                for b in repo.list_branches(campaign_id)]
+    return {"active_branch_id": campaign.active_branch_id, "branches": branches}
+
+
+@router.post("/campaigns/{campaign_id}/switch")
+async def switch_branch(campaign_id: str, req: SwitchBranchRequest, request: Request):
+    deps = _deps(request)
+    try:
+        campaign = deps.repo.get_campaign(campaign_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="campaign not found")
+    branch = deps.repo.get_branch(req.branch_id)
+    if branch is None or branch.campaign_id != campaign_id:
+        raise HTTPException(status_code=400, detail="branch not in campaign")
+    deps.repo.switch_branch(campaign_id, req.branch_id)
+    if deps.manager is not None:
+        await deps.manager.on_branch_switch(campaign_id)
+    return {"active_branch_id": req.branch_id}
