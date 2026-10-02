@@ -73,7 +73,7 @@ ensemble/
 │       ├── graph/test_incremental.py  # Task M3-2
 │       ├── graph/test_gm_narrate.py   # Task M3-3（追加流式用例）
 │       ├── graph/test_endings.py      # Task M3-4
-│       ├── graph/test_attitude.py     # Task M3-4A（post_turn 集成 + 正向链路）
+│       ├── graph/test_attitude_flow.py # Task M3-4A（post_turn 集成 + 正向链路）
 │       ├── graph/test_gm_decide.py    # Task M3-4A（追加 DECIDE_SYSTEM 断言）
 │       ├── graph/test_fork.py         # Task M3-7
 │       ├── rules/test_attitude.py     # Task M3-4A（纯函数全覆盖）
@@ -1034,7 +1034,7 @@ git commit -m "feat(graph): runtime clue reveal and ending trigger with graph te
 - Create: `backend/app/rules/attitude.py`（常量 + 纯函数）
 - Modify: `backend/app/graph/nodes/turn.py`（post_turn 应用 + `attitude` 事件）
 - Modify: `backend/app/graph/nodes/gm.py`（DECIDE_SYSTEM 字段说明）
-- Test: `backend/tests/rules/test_attitude.py`（新建）、`backend/tests/graph/test_attitude.py`（新建）、`backend/tests/graph/test_gm_decide.py`（追加 1 个用例）
+- Test: `backend/tests/rules/test_attitude.py`（新建）、`backend/tests/graph/test_attitude_flow.py`（新建）、`backend/tests/graph/test_gm_decide.py`（追加 1 个用例）
 
 **Interfaces:**
 - Consumes: `GmDecision`、`build_post_turn_node(repo, memory, module=None)`（M3-4 形态）、`SqliteRepository.add_event(..., visibility=)`（M2）
@@ -1196,7 +1196,7 @@ def test_decide_system_documents_attitude_deltas():
     assert "attitude_deltas" in DECIDE_SYSTEM
 ```
 
-新建 `backend/tests/graph/test_attitude.py`：
+新建 `backend/tests/graph/test_attitude_flow.py`：
 ```python
 import json
 
@@ -1303,7 +1303,7 @@ def test_attitude_change_reaches_next_turn_prompt(repo, campaign, mini_module):
     assert "当前态度 30" in prompt               # 变化自下一回合起生效
 ```
 
-Run: `cd backend; uv run pytest tests/graph/test_attitude.py tests/graph/test_gm_decide.py -q`
+Run: `cd backend; uv run pytest tests/graph/test_attitude_flow.py tests/graph/test_gm_decide.py -q`
 Expected: FAIL —— 集成用例 `KeyError: 'npc_attitudes'`、正向链路 `assert 30 == 40`、提示词契约断言失败；容错用例此时通过（无变更路径与旧行为重合，属预期）
 
 - [ ] **Step 5: 实现 schemas / 提示词 / post_turn 应用**
@@ -1386,7 +1386,7 @@ def build_post_turn_node(repo, memory, module=None):
 
 - [ ] **Step 6: 跑目标测试**
 
-Run: `cd backend; uv run pytest tests/rules/test_attitude.py tests/graph/test_attitude.py tests/graph/test_gm_decide.py -q`
+Run: `cd backend; uv run pytest tests/rules/test_attitude.py tests/graph/test_attitude_flow.py tests/graph/test_gm_decide.py -q`
 Expected: PASS —— 新增用例全绿；`test_gm_decide.py` 既有 7 例不受影响
 
 - [ ] **Step 7: 兼容硬验收（全量回归）**
@@ -1397,9 +1397,11 @@ Expected: PASS —— 既有全部用例（含 `tests/graph/test_replay_smoke.py
 - [ ] **Step 8: Commit**
 
 ```bash
-git add backend/app/rules/attitude.py backend/app/graph/schemas.py backend/app/graph/nodes/turn.py backend/app/graph/nodes/gm.py backend/tests/rules/test_attitude.py backend/tests/graph/test_attitude.py backend/tests/graph/test_gm_decide.py
+git add backend/app/rules/attitude.py backend/app/graph/schemas.py backend/app/graph/nodes/turn.py backend/app/graph/nodes/gm.py backend/tests/rules/test_attitude.py backend/tests/graph/test_attitude_flow.py backend/tests/graph/test_gm_decide.py
 git commit -m "feat(graph): NPC attitude evolution with bounded deltas and attitude events"
 ```
+
+> **交付记录（2026-10-02）**：实现按计划落地（`AttitudeDelta` 契约、DECIDE_SYSTEM 字段说明、`apply_attitude_deltas` 硬边界纯函数、post_turn 单点应用 + `attitude` 事件 + 快照自动持久化；变化自下一回合起生效）。修正计划草稿一处：`tests/graph/test_attitude.py` 与 `tests/rules/test_attitude.py` 同名 —— 本项目测试目录无 `__init__.py`，pytest 收集报 basename 冲突（本项目首例），graph 侧改名 `test_attitude_flow.py`（本块内引用已同步）。验收：新增 14 例（rules 10 / 集成 2 / 正向链路 1 / decide 契约 1）先红后绿，全量 `185 passed, 1 skipped`（硬验收通过：回放冒烟 `replay.index == 6` 与既有 `module=None` 路径逐字不变）。
 
 ---
 
