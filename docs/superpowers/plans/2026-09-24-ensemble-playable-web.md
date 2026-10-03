@@ -2339,6 +2339,8 @@ git add backend/app/api/events.py backend/tests/api/test_event_bus.py
 git commit -m "feat(api): in-memory ws event bus with visibility filter and replay buffer"
 ```
 
+> **交付记录（2026-10-03）**：计划草稿零修正、一次通过（5 例测试一次全绿）——`replay` 的 gap 判定（`buffer[0].seq > since_seq + 1`）与既有用例边界自洽，无需调整。实现与计划一致：`WsEvent`（frozen：`to_json` ensure_ascii=False / `visible_to`）+ `Subscriber`（asyncio.Queue）+ `EventBus`（seq 自增、`deque(maxlen=replay_size)` 环形缓冲、逐订阅者可见性过滤分发、`replay` 返回「该玩家可见增量 + gap」、`current_seq`）。验收：新增 5 例先红后绿（跑红 `ModuleNotFoundError: app.api.events`），目标组（api+graph+cli）`112 passed, 1 skipped`，全量 `204 passed, 1 skipped`。
+
 ---
 
 ### Task M3-9: TurnBuffer（回合输入收集状态机）
