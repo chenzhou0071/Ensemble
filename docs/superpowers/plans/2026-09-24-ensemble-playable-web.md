@@ -3093,6 +3093,8 @@ git commit -m "feat(api): room session manager driving graph via custom stream w
 **Files:**
 - Create: `backend/app/api/ws.py`
 - Modify: `backend/app/api/app.py`（替换 T5 的 `create_app`：自动装配 SessionManager、挂 ws router、lifespan 清理）
+- Modify: `backend/app/api/session.py`（新增 `has()`：REST 切分支仅在有活跃会话时通知）
+- Modify: `backend/app/api/routes.py`（switch/restore 两处：`if deps.manager is not None and deps.manager.has(campaign_id)`）
 - Test: `backend/tests/api/test_ws.py`
 
 **Interfaces:**
@@ -3137,13 +3139,16 @@ TURN_DECIDE = ('{"intent_summary": "调查", "checks": [], "proactive_npc_trigge
 
 
 def script_factory(items):
+    """按模型名消耗脚本；摘要（extractor 角色）在后台线程调用，
+    用独立模型名隔离：未知模型抛 AssertionError 由后台队列吞掉（不消耗主脚本）。
+    """
     queues = {"qwen3.8-flash": list(items)}
 
     def factory(model, base_url, api_key):
         q = queues.get(model)
-        if not q:
+        if q is None:
             raise AssertionError(f"unexpected model call: {model}")
-        return FakeLLM([q.pop(0)])
+        return FakeLLM([q.pop(0)] if q else [])
 
     return factory
 
@@ -3156,6 +3161,7 @@ def app(tmp_path):
     settings = Settings(sqlite_path=str(tmp_path / "ws.db"),
                         modules_dir=str(ROOT / "modules"),
                         pricing_path=str(ROOT / "config" / "pricing.yaml"),
+                        extractor_model="qwen-extract",   # 摘要隔离：后台线程不抢脚本
                         single_player_debounce_seconds=0.1,
                         turn_window_seconds=3.0)
     factory = script_factory([OPENING_DECIDE, "雾气笼罩着广场。",
@@ -3211,7 +3217,7 @@ def test_ws_rejects_ghost_player(app):
 - [ ] **Step 2: 验证失败**
 
 Run: `cd backend; uv run pytest tests/api/test_ws.py -q`
-Expected: FAIL —— `ModuleNotFoundError: No module named 'app.api.ws'`
+Expected: FAIL —— `test_ws_full_round_trip` 报 `WebSocketDisconnect`（ws 路由尚未注册时 starlette 以 close(1000) 拒绝，而非 ModuleNotFoundError）；`test_ws_rejects_ghost_player` 跑红时为假绿（同一异常碰巧满足断言），实现后才真验证。实测输出：`1 failed, 1 passed`。
 
 - [ ] **Step 3: 实现 ws.py 与 app.py 修改**
 
@@ -3357,9 +3363,11 @@ Expected: PASS —— 新用例全绿；后端全量测试全绿
 - [ ] **Step 5: Commit**
 
 ```bash
-git add backend/app/api/ws.py backend/app/api/app.py backend/tests/api/test_ws.py
+git add backend/app/api/ws.py backend/app/api/app.py backend/tests/api/test_ws.py backend/app/api/routes.py backend/app/api/session.py
 git commit -m "feat(api): websocket endpoint with replay/resync and full app wiring"
 ```
+
+> **交付记录（2026-10-03）**：ws.py / app.py 实现与计划一致（零修正），另含 3 处实测驱动的计划修正。① **REST 切换连锁问题**：`create_app` 恒装配 manager 后，M3-7 路由的 `if deps.manager is not None` 恒真 → REST-only 切分支触发 `on_branch_switch`（load_pricing / 构建图 / 驱动开场，且引入 LLM 依赖），`test_switch_branch` 因 fixture 无 `pricing_path` 报 `FileNotFoundError: 'config\pricing.yaml'` → 新增 `SessionManager.has()`，switch/restore 两处改为"仅存在活跃会话时通知"（无会话时 DB 更新即可，将来 WS 连接自然从新分支装配）；② **测试摘要隔离**（沿用 M3-10 教训）：`script_factory` 隔离版 + fixture `extractor_model="qwen-extract"`；③ **跑红形态修正**：计划预期 `ModuleNotFoundError`，实测为 `WebSocketDisconnect`（close 1000；ghost 用例跑红时假绿）。验收：新增 2 例先红后绿，api 组 `26 passed`，全量 `216 passed, 1 skipped`。
 
 ---
 
