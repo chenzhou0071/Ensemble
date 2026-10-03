@@ -52,7 +52,8 @@ def make_script(char_id: str) -> list[str]:
             ending_decide, "石台在轰鸣中崩塌，缠绕镇子的低语骤然停止。"]
 
 
-def build_env(tmp_path, script=None):
+def build_env(tmp_path, script=None, campaign=None):
+    """构建应用环境；campaign 传入时复用既有战役（模拟重开服务：同库重建）。"""
     engine = make_engine(str(tmp_path / "e2e.db"))
     init_db(engine)
     repo = SqliteRepository(engine)
@@ -62,10 +63,15 @@ def build_env(tmp_path, script=None):
                         extractor_model="qwen-extract",  # 摘要隔离：后台线程不抢脚本
                         single_player_debounce_seconds=0.1,
                         turn_window_seconds=10.0)
-    campaign = repo.create_campaign("misty_hollow", "端到端")
-    player = repo.add_player(campaign.id, "张三")
-    char = make_default_character(player.id, "张三")
-    repo.append_character(campaign.id, campaign.active_branch_id, 0, char.id, asdict(char))
+    if campaign is None:
+        campaign = repo.create_campaign("misty_hollow", "端到端")
+        player = repo.add_player(campaign.id, "张三")
+        char = make_default_character(player.id, "张三")
+        repo.append_character(campaign.id, campaign.active_branch_id, 0, char.id,
+                              asdict(char))
+    else:
+        player = repo.list_players(campaign.id)[0]
+        char = make_default_character(player.id, player.display_name)
     deps = AppDeps(settings=settings, repo=repo,
                    model_factory=script_factory(script if script is not None
                                                 else make_script(char.id)))
@@ -155,6 +161,37 @@ def test_reconnect_replays_full_history_and_can_continue(tmp_path):
             assert ended[-1]["payload"]["ending_reached"] == "ending_break"
             # 实时事件（本回合新产生）不带 replay 标记
             assert "replay" not in ended[-1]
+
+
+def test_reenter_after_backend_restart_restores_state(tmp_path):
+    """重开后端后重进存档：首连即补推权威状态（角色/历史叙事/场景/线索），
+    无需等到下一次输入驱动回合。"""
+    app, repo, campaign, player, char = build_env(tmp_path)
+    url = f"/ws/campaign/{campaign.id}?player_id={player.id}"
+    with TestClient(app) as client:
+        with client.websocket_connect(url) as ws:
+            events: list[dict] = []
+            pump_until(ws, events, _collecting(1))
+            ws.send_text(json.dumps({"type": "input", "text": "我凑近公告栏查看启事"}))
+            pump_until(ws, events, _collecting(2))
+
+    # 模拟后端重启：同一数据库重建应用（内存会话与事件总线全部丢失）
+    app2, *_ = build_env(tmp_path, campaign=campaign)
+    with TestClient(app2) as client2:
+        replayed: list[dict] = []
+        with client2.websocket_connect(url + "&resume_from=0") as ws2:
+            pump_until(ws2, replayed, _collecting(2))
+
+    states = [e for e in replayed if e["type"] == "state"]
+    assert states, "重开后首连应收到权威状态快照"
+    payload = states[-1]["payload"]
+    assert len(payload["characters"]) == 1                  # 角色信息恢复
+    assert payload["segments"], "历史叙事应随状态恢复（旧文字立即可见）"
+    assert [c["clue_id"] for c in payload["clues_revealed"]] == ["clue_missing"]
+    assert any(e["type"] == "scene" and e["payload"]["scene_id"] == "square"
+               for e in replayed), "场景（含 NPC 列表）应恢复"
+    assert any(e["type"] == "dice" for e in replayed), "骰子日志应恢复"
+    assert all(e.get("replay") is True for e in replayed), "恢复事件均属回放（不重播动画）"
 
 
 MOVE_SCRIPT = [

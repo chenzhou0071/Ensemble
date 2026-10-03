@@ -133,6 +133,7 @@ class SessionManager:
         """按 checkpoint 挂起状态决定：续玩开窗 / 全新开场 / 中间态报错 / 已结束。"""
         snap = session.graph.get_state(session.config)
         if snap.next == ("wait_input",):
+            self._backfill(session, snap)   # 重开服务后内存总线为空：首连先补权威历史
             self._open_window(session)
             return
         if snap.next:
@@ -146,6 +147,7 @@ class SessionManager:
             return
         if (snap.values or {}).get("ending_reached"):
             session.ended = True
+            self._backfill(session, snap)   # 已结局的档：同样先补权威历史再报结局
             session.bus.push("turn", {"phase": "ended",
                                       "ending_reached": snap.values["ending_reached"]})
 
@@ -228,9 +230,10 @@ class SessionManager:
             session.last_dice_id = max(session.last_dice_id, int(rid))
         session.bus.push("dice", payload)
 
-    def _push_snapshot(self, session: RoomSession) -> None:
-        """驱动收口：从 L2 读权威结果推送，并决定下一步（开窗/暂停/结束）。"""
-        snap = session.graph.get_state(session.config)
+    def _backfill(self, session: RoomSession, snap) -> None:
+        """从 L2 补推权威历史：骰子/线索/场景事件 + 状态快照（含场景首推兜底）。
+        调用点：①驱动收口（_push_snapshot）；②重开服务后首连续玩（_start）——
+        此时内存事件总线为空，客户端无从重建界面，必须由此对齐。"""
         values = snap.values or {}
         finished_turn = max(int(values.get("turn_id", 1)) - 1, 0)
         for row in session.repo.list_dice_records(session.campaign_id,
@@ -262,6 +265,12 @@ class SessionManager:
                 session.prev_scene = payload["scene_id"]
                 session.bus.push("scene", payload)
         session.bus.push("state", self._state_payload(session))
+
+    def _push_snapshot(self, session: RoomSession) -> None:
+        """驱动收口：从 L2 读权威结果推送，并决定下一步（开窗/暂停/结束）。"""
+        snap = session.graph.get_state(session.config)
+        self._backfill(session, snap)
+        values = snap.values or {}
 
         error = values.get("error")
         if error == "budget_paused":
