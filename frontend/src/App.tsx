@@ -1,4 +1,29 @@
-// 占位：M3-13 / M3-14 将替换为大厅与房间视图（build 校验需要存在）。
+import { useState } from "react";
+
+import Lobby from "./views/Lobby";
+import Room from "./views/Room";
+import { clearSession, loadSession, saveSession, type Session } from "./session";
+
 export default function App() {
-  return <div className="lobby">Ensemble</div>;
+  const [session, setSession] = useState<Session | null>(() => loadSession());
+
+  if (!session) {
+    return (
+      <Lobby
+        onEnter={(s) => {
+          saveSession(s);
+          setSession(s);
+        }}
+      />
+    );
+  }
+  return (
+    <Room
+      session={session}
+      onLeave={() => {
+        clearSession();
+        setSession(null);
+      }}
+    />
+  );
 }
