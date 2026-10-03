@@ -4398,7 +4398,7 @@ export default function App() {
 - [ ] **Step 4: 验证通过**
 
 Run: `cd frontend; npm run test; npm run build`
-Expected: PASS（8 passed）；build 成功
+Expected: PASS（14 passed = 既有 12 + 新增 2）；build 成功
 
 - [ ] **Step 5: Commit**
 
@@ -4406,6 +4406,8 @@ Expected: PASS（8 passed）；build 成功
 git add frontend/src/session.ts frontend/src/views frontend/src/App.tsx
 git commit -m "feat(frontend): lobby with campaign create/continue and room shell navigation"
 ```
+
+> **交付记录（2026-10-03）**：实现与计划一致（4 文件零修正）、一次通过——跑红 `Failed to resolve import "../Lobby"`（1 failed | 3 passed，既有 12 例不受影响）；跑绿 `4 files / 14 passed`（无 act 警告）；build 成功（145.42 KB JS，较上版 +2.9 KB：App 真实引用 Lobby/Room/session 已入包，符合预期）。修正 1 处笔误：Step 4 预期原写 "8 passed"，实际应为 14（既有 12 + 新增 2）。
 
 ---
 
