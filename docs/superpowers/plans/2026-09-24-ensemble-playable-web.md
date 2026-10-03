@@ -4113,7 +4113,7 @@ export const useGame = create<GameStore>((set) => ({
 - [ ] **Step 4: 验证通过**
 
 Run: `cd frontend; npm run test; npm run build`
-Expected: PASS（6 passed）；build 成功
+Expected: PASS（12 passed = 新增 6 + 既有 6）；build 成功
 
 - [ ] **Step 5: Commit**
 
@@ -4121,6 +4121,8 @@ Expected: PASS（6 passed）；build 成功
 git add frontend/src/stores
 git commit -m "feat(frontend): pure event reducer and zustand game store"
 ```
+
+> **交付记录（2026-10-03）**：实现与计划一致（game.ts 零修正）、一次通过——跑红 `Failed to resolve import "../game"`（1 failed | 2 passed，既有 6 例不受影响）；跑绿 `3 files / 12 passed`；build 成功（tsc 零类型错误）。修正 1 处笔误：Step 4 预期原写 "6 passed"，实际应为 12（新增 6 + 既有 6）。
 
 ---
 
