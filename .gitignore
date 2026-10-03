@@ -9,3 +9,5 @@ __pycache__/
 *.db-journal
 .env
 node_modules/
+dist/
+*.tsbuildinfo
