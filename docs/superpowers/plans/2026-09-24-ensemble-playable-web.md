@@ -4754,7 +4754,7 @@ git commit -m "feat(frontend): room with live narration stream, input bar and mo
 
 `frontend/src/components/__tests__/DiceOverlay.test.tsx`：
 ```tsx
-import { render, screen } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import DiceOverlay from "../DiceOverlay";
@@ -4776,10 +4776,10 @@ describe("DiceOverlay", () => {
     const onDone = vi.fn();
     render(<DiceOverlay dice={DICE} onDone={onDone} />);
     expect(screen.getByText(/侦查（50）/)).toBeInTheDocument();
-    vi.advanceTimersByTime(2000);
+    act(() => { vi.advanceTimersByTime(2000); });
     expect(screen.getByText("12")).toBeInTheDocument();
     expect(screen.getByText("困难成功")).toBeInTheDocument();
-    vi.advanceTimersByTime(700);
+    act(() => { vi.advanceTimersByTime(700); });
     expect(onDone).toHaveBeenCalled();
   });
 });
@@ -4815,7 +4815,7 @@ describe("EndingOverlay", () => {
 - [ ] **Step 2: 验证失败**
 
 Run: `cd frontend; npm run test`
-Expected: FAIL —— `Failed to resolve import "../DiceOverlay"`
+Expected: FAIL —— `Failed to resolve import "../DiceOverlay" / "../EndingOverlay"`（2 个文件）
 
 - [ ] **Step 3: 实现组件**
 
@@ -5070,7 +5070,7 @@ import NpcPanel from "../components/NpcPanel";
 - [ ] **Step 6: 验证通过**
 
 Run: `cd frontend; npm run test; npm run build`
-Expected: PASS（17 passed）；build 成功
+Expected: PASS（22 passed = 18 既有 + 4 新增）；build 成功
 
 - [ ] **Step 7: Commit**
 
@@ -5078,6 +5078,8 @@ Expected: PASS（17 passed）；build 成功
 git add frontend/src
 git commit -m "feat(frontend): dice scramble animation, side panels and ending overlay"
 ```
+
+> **交付记录（2026-10-03）**：6 组件 + Room 接入 + 样式，TDD 全流程。跑红 2 文件 resolve 失败（既有 18 全过）；首轮跑绿 DiceOverlay 1 例失败 → **修正 1 处计划测试设计缺陷**：React 18 concurrent 渲染下 `vi.advanceTimersByTime` 推进 fake timers 时 interval 回调的 setState 不会 flush 到 DOM（"Unable to find text: 12"），timer 推进必须包 `act(() => ...)` → 修正后 8 files / 22 passed；build 成功（156.55 KB JS / 3.14 KB CSS）。计划 Step 6 笔误：预期原写 "17 passed"，实际 22（18 既有 + 4 新增）。
 
 ---
 ### Task M3-17: 端到端验收（serve 入口 + 全流程 E2E + README）
