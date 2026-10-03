@@ -95,3 +95,12 @@ class IncrementalSegmenter:
         out = [(self._speaker, self._buf)]
         self._buf = ""
         return out
+
+
+def stream_writer():
+    """LangGraph custom stream writer；invoke/CLI 场景返回 no-op（版本差异兜底）。"""
+    try:
+        from langgraph.config import get_stream_writer
+        return get_stream_writer()
+    except Exception:
+        return lambda _payload: None

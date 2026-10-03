@@ -12,10 +12,12 @@ class WsEvent:
     visibility: str
     payload: dict
 
-    def to_json(self) -> str:
-        return json.dumps({"seq": self.seq, "type": self.type,
-                           "visibility": self.visibility, "payload": self.payload},
-                          ensure_ascii=False)
+    def to_json(self, replay: bool = False) -> str:
+        data = {"seq": self.seq, "type": self.type,
+                "visibility": self.visibility, "payload": self.payload}
+        if replay:
+            data["replay"] = True   # 历史回放标记：消费方据此区分「重放」与「实时」
+        return json.dumps(data, ensure_ascii=False)
 
     def visible_to(self, player_id: str) -> bool:
         return self.visibility == "all" or self.visibility == f"player:{player_id}"

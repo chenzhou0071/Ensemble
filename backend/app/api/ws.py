@@ -40,7 +40,7 @@ async def ws_campaign(websocket: WebSocket, campaign_id: str,
             await websocket.send_text(resync.to_json())
         else:
             for evt in events:
-                await websocket.send_text(evt.to_json())
+                await websocket.send_text(evt.to_json(replay=True))   # 历史回放标记
         await _serve(websocket, session, sub, deps.manager, campaign_id, player_id)
     finally:
         session.bus.unsubscribe(sub)

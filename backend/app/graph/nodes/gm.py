@@ -3,7 +3,7 @@ import json
 import re
 from typing import Callable
 
-from app.graph.narrative import IncrementalSegmenter, parse_segments
+from app.graph.narrative import IncrementalSegmenter, parse_segments, stream_writer
 from app.graph.schemas import parse_decision_json
 from app.graph.state import GameState
 from app.llm.client import ChatMessage, LLMClient, LlmContext
@@ -208,15 +208,6 @@ def _previous_narration_tail(state: GameState, repo) -> str:
     return f"上一回合结尾（仅供承接，不要复述）：…{tail}\n" if tail else ""
 
 
-def _stream_writer():
-    """LangGraph custom stream writer；invoke/CLI 场景返回 no-op（版本差异兜底）。"""
-    try:
-        from langgraph.config import get_stream_writer
-        return get_stream_writer()
-    except Exception:
-        return lambda _payload: None
-
-
 def build_narrate_node(client: LLMClient, module, repo=None) -> Callable[[GameState], dict]:
     def gm_narrate(state: GameState) -> dict:
         scene = module.scene(state["scene_id"])
@@ -252,7 +243,7 @@ def build_narrate_node(client: LLMClient, module, repo=None) -> Callable[[GameSt
         )
         messages = [ChatMessage(role="system", content=NARRATE_SYSTEM),
                     ChatMessage(role="user", content=user)]
-        writer = _stream_writer()
+        writer = stream_writer()
         last_error = ""
         for _ in range(2):  # 首次 + repair 重试 1 次（规格 §8）
             writer({"reset": True})  # 重试时通知消费方清空已呈现内容

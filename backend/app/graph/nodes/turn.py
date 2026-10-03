@@ -1,6 +1,7 @@
 """回合节点：intake / wait_input / resolve_checks / apply_transition / post_turn / fallback。"""
 from langgraph.types import interrupt
 
+from app.graph.narrative import stream_writer
 from app.graph.state import GameState
 from app.memory.base import MemoryEvent
 from app.rules.attitude import apply_attitude_deltas
@@ -68,6 +69,7 @@ def build_resolve_checks_node(repo):
     def resolve_checks(state: GameState) -> dict:
         campaign_id, branch_id, turn_id = state["campaign_id"], state["branch_id"], state["turn_id"]
         checks = (state.get("decision") or {}).get("checks", [])
+        writer = stream_writer()
         results = []
         for chk in checks:
             actor, skill = chk["actor"], chk["skill"]
@@ -75,8 +77,14 @@ def build_resolve_checks_node(repo):
             seed = new_seed()
             r = roll_check(actor, skill, skill_value,
                            CheckDifficulty(chk.get("difficulty", "regular")), seed)
-            repo.add_dice_record(campaign_id, branch_id, turn_id, r.actor, r.skill,
-                                 r.skill_value, str(r.difficulty), r.roll, str(r.level), r.seed)
+            rid = repo.add_dice_record(campaign_id, branch_id, turn_id, r.actor, r.skill,
+                                       r.skill_value, str(r.difficulty), r.roll, str(r.level),
+                                       r.seed)
+            # 骰子先出：掷骰后立即经流式通道推送（先于叙事 token；收口快照按 id 去重兜底）
+            writer({"dice": {"id": rid, "actor": r.actor, "skill": r.skill,
+                             "skill_value": r.skill_value, "difficulty": str(r.difficulty),
+                             "roll": r.roll, "level": str(r.level),
+                             "success": r.success, "seed": r.seed}})
             verdict = "成功" if r.success else "失败"
             repo.add_event(campaign_id, branch_id, turn_id, type="check",
                            payload={"text": f"{actor} 的「{skill}」检定：{r.roll}/{r.skill_value} "
