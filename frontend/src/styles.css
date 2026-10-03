@@ -44,3 +44,28 @@ input, select {
 .conn-badge.open { background: #25402b; }
 .notice-banner { background: #21303d; border: 1px solid #3b5a72;
   padding: 6px 12px; border-radius: 6px; margin: 8px 16px 0; }
+.room-side .panel { margin-bottom: 18px; }
+.panel h3 { margin: 6px 0 8px; font-size: 14px; color: #9aa7b8; }
+.panel ul { margin: 0; padding-left: 18px; }
+.chip { display: inline-block; margin: 2px 4px 2px 0; padding: 1px 8px;
+  border-radius: 10px; background: #232a35; font-size: 12px; }
+.char-card { padding: 8px 0; border-bottom: 1px solid #262c36; }
+.char-name { font-weight: 600; }
+.char-name .hp { color: #8fd18f; font-weight: 400; margin-left: 8px; }
+.muted { color: #6b7686; font-size: 13px; }
+.panel li.ok { color: #8fd18f; }
+.panel li.bad { color: #e08f8f; }
+.dice-overlay { position: fixed; inset: 0; display: flex; align-items: center;
+  justify-content: center; background: rgba(10, 12, 16, 0.55); z-index: 50; }
+.dice-card { background: #1d222b; border: 1px solid #3d4757; border-radius: 12px;
+  padding: 20px 36px; text-align: center; min-width: 220px; }
+.dice-who { color: #9aa7b8; font-size: 13px; margin-bottom: 8px; }
+.dice-roll { font-size: 44px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.dice-roll.ok { color: #8fd18f; }
+.dice-roll.bad { color: #e08f8f; }
+.dice-level { margin-top: 6px; }
+.ending-overlay { position: fixed; inset: 0; display: flex; align-items: center;
+  justify-content: center; background: rgba(8, 10, 14, 0.85); z-index: 60; }
+.ending-card { max-width: 460px; background: #1d222b; border: 1px solid #4a5568;
+  border-radius: 12px; padding: 28px 32px; text-align: center; }
+.turn-badge { margin-left: auto; color: #9aa7b8; font-size: 13px; }

@@ -1,9 +1,15 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { api } from "../api/rest";
 import { WsClient } from "../api/ws";
+import CharacterPanel from "../components/CharacterPanel";
+import CluePanel from "../components/CluePanel";
+import DiceLogPanel from "../components/DiceLogPanel";
+import DiceOverlay from "../components/DiceOverlay";
+import EndingOverlay from "../components/EndingOverlay";
 import InputBar from "../components/InputBar";
 import NarrationStream from "../components/NarrationStream";
+import NpcPanel from "../components/NpcPanel";
 import type { Session } from "../session";
 import { useGame } from "../stores/game";
 import type { ModuleDetail } from "../types";
@@ -34,6 +40,14 @@ export default function Room({ session, onLeave }: {
     return map;
   }, [moduleInfo]);
 
+  const handleDicePlayed = useCallback(() => {
+    useGame.getState().dicePlayed();
+  }, []);
+  const endingCondition = useMemo(
+    () => moduleInfo?.endings.find((e) => e.id === state.endingReached)?.condition,
+    [moduleInfo, state.endingReached],
+  );
+
   return (
     <div className="room">
       <header className="room-header">
@@ -53,11 +67,20 @@ export default function Room({ session, onLeave }: {
       <main className="room-main">
         <NarrationStream segments={state.segments} live={state.live}
                          npcNames={npcNames} />
+        <aside className="room-side">
+          <CharacterPanel characters={state.characters as never[]} />
+          <NpcPanel sceneNpcs={state.scene?.npcs ?? []} npcNames={npcNames} />
+          <CluePanel clues={state.clues} />
+          <DiceLogPanel diceLog={state.diceLog} />
+        </aside>
       </main>
       <footer className="room-footer">
         <InputBar phase={state.phase} connected={state.connected}
                   onSubmit={(text) => clientRef.current?.sendInput(text)} />
       </footer>
+      <DiceOverlay dice={state.diceQueue[0] ?? null} onDone={handleDicePlayed} />
+      <EndingOverlay endingReached={state.endingReached} condition={endingCondition}
+                     onLeave={onLeave} />
     </div>
   );
 }
