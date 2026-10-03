@@ -2526,6 +2526,8 @@ git add backend/app/api/turn_buffer.py backend/tests/api/test_turn_buffer.py
 git commit -m "feat(api): turn buffer state machine with single-player debounce and window carry-over"
 ```
 
+> **交付记录（2026-10-03）**：计划草稿零修正、一次通过（7 例全绿）——`should_close` 三分支（单人防抖 / 多人齐全 / 窗口超时）与用例边界自洽。实现与计划一致：`TurnBuffer`（open 顺延 pending_next + epoch 自增；submit accepted/deferred/ignored 与后发覆盖；close 产出 `TurnInputs.model_dump()` 结构含 skipped）。验收：新增 7 例先红后绿（跑红 `ModuleNotFoundError: app.api.turn_buffer`），目标组（api+graph+cli）`119 passed, 1 skipped`，全量 `211 passed, 1 skipped`。
+
 ---
 
 ### Task M3-10: RoomSession 与 SessionManager（会话驱动核心）
@@ -2560,7 +2562,7 @@ git commit -m "feat(api): turn buffer state machine with single-player debounce 
 
 - [ ] **Step 1: 并发安全前置修改（db.py / main.py / pyproject.toml）**
 
-`backend/app/storage/db.py` 的 `make_engine` 替换为（WAL：读写并发不互斥；busy_timeout：写锁等待而非立即失败）：
+`backend/app/storage/db.py` 的 `make_engine` 替换为（WAL：读写并发不互斥；busy_timeout：写锁等待而非立即失败）——**交付核对：现状 `make_engine` 已含这两项 PRAGMA（等价），无需改动**：
 ```python
 """SQLite 引擎与建表（WAL + busy_timeout：多连接并发安全）。"""
 from sqlalchemy import create_engine, event
@@ -2630,14 +2632,18 @@ TURN_DECIDE = ('{"intent_summary": "调查", "checks": [], "proactive_npc_trigge
 
 
 def script_factory(items):
-    """按模型名消耗脚本；每次 chat 新建 FakeLLM（与 LLMClient 的工厂调用方式一致）。"""
+    """按模型名消耗脚本；每次 chat 新建 FakeLLM（与 LLMClient 的工厂调用方式一致）。
+
+    摘要（extractor 角色）在后台线程调用，用独立模型名隔离：
+    未知模型抛 AssertionError 由后台队列吞掉，不消耗主脚本。
+    """
     queues = {"qwen3.8-flash": list(items)}
 
     def factory(model, base_url, api_key):
         q = queues.get(model)
-        if not q:
+        if q is None:
             raise AssertionError(f"unexpected model call: {model}")
-        return FakeLLM([q.pop(0)])
+        return FakeLLM([q.pop(0)] if q else [])
 
     return factory
 
@@ -2650,6 +2656,7 @@ def room(tmp_path):
     settings = Settings(sqlite_path=str(tmp_path / "api.db"),
                         modules_dir=str(ROOT / "modules"),
                         pricing_path=str(ROOT / "config" / "pricing.yaml"),
+                        extractor_model="qwen-extract",   # 摘要隔离：后台线程不抢脚本
                         single_player_debounce_seconds=0.1,
                         turn_window_seconds=3.0)
     campaign = repo.create_campaign("misty_hollow", "会话测试")
@@ -2659,24 +2666,20 @@ def room(tmp_path):
     return repo, settings, campaign, player
 
 
-async def collect_until(session, predicate, timeout=8.0):
-    """订阅总线收集事件直到 predicate(events) 为真（测试辅助）。"""
-    sub = session.bus.subscribe("__test__")
-    try:
-        events = []
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            try:
-                evt = await asyncio.wait_for(
-                    sub.queue.get(), timeout=max(deadline - time.time(), 0.01))
-            except asyncio.TimeoutError:
-                break
-            events.append(evt)
-            if predicate(events):
-                return events
-        raise AssertionError(f"condition not met; got {[e.type for e in events]}")
-    finally:
-        session.bus.unsubscribe(sub)
+async def collect_until(sub, predicate, timeout=8.0):
+    """收集订阅队列事件直到 predicate(events) 为真（调用方负责订阅与退订）。"""
+    events = []
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            evt = await asyncio.wait_for(
+                sub.queue.get(), timeout=max(deadline - time.time(), 0.01))
+        except asyncio.TimeoutError:
+            break
+        events.append(evt)
+        if predicate(events):
+            return events
+    raise AssertionError(f"condition not met; got {[e.type for e in events]}")
 
 
 async def test_opening_then_round_trip(room):
@@ -2687,12 +2690,15 @@ async def test_opening_then_round_trip(room):
     session = await manager.ensure_started(campaign.id)
     assert session.buffer.phase == "collecting"
 
-    status = await manager.handle_submit(campaign.id, player.id, "我绕到喷泉后面")
-    assert status == "accepted"
-
-    events = await collect_until(session, lambda evts: any(
-        e.type == "turn" and e.payload.get("phase") == "collecting"
-        and e.payload.get("turn_id") == 2 for e in evts))
+    sub = session.bus.subscribe("__test__")      # 先订阅再提交：actor 广播不遗漏
+    try:
+        status = await manager.handle_submit(campaign.id, player.id, "我绕到喷泉后面")
+        assert status == "accepted"
+        events = await collect_until(sub, lambda evts: any(
+            e.type == "turn" and e.payload.get("phase") == "collecting"
+            and e.payload.get("turn_id") == 2 for e in evts))
+    finally:
+        session.bus.unsubscribe(sub)
     assert any(e.type == "state" for e in events)
     assert any(e.type == "actor" for e in events)
     assert session.buffer.phase == "collecting"
@@ -2757,7 +2763,7 @@ from app.config import Settings, load_pricing
 from app.content.loader import load_module
 from app.content.registry import find_module_path
 from app.graph.main import build_checkpointer, build_game_graph
-from app.llm.client import LLMClient
+from app.llm.client import LLMClient, make_repo_budget_probe
 from app.llm.usage import BudgetGuard
 from app.memory.journal import JournalMemory
 from app.memory.scheduler import BackgroundSummaries
@@ -2832,14 +2838,16 @@ class SessionManager:
         campaign = deps.repo.get_campaign(campaign_id)
         module = load_module(find_module_path(deps.settings.modules_dir,
                                               campaign.module_id))
+        guard = BudgetGuard(deps.settings)
         client = LLMClient(deps.settings, load_pricing(deps.settings.pricing_path),
-                           usage_sink=deps.repo, model_factory=deps.model_factory)
+                           usage_sink=deps.repo, model_factory=deps.model_factory,
+                           budget_probe=make_repo_budget_probe(deps.repo, guard))
         journal = JournalMemory(deps.repo, summarizer=LLMSummarizer(client))
         queue = BackgroundQueue(lambda key, payload: journal.update_summaries(*payload),
                                 name="summary")
         queue.start()
         graph = build_game_graph(deps.repo, module, BackgroundSummaries(journal, queue),
-                                 client, BudgetGuard(deps.settings),
+                                 client, guard,
                                  build_checkpointer(deps.settings.sqlite_path))
         session = RoomSession(
             campaign_id=campaign_id, repo=deps.repo, settings=deps.settings,
@@ -2930,13 +2938,22 @@ class SessionManager:
         snap0 = session.graph.get_state(session.config)
         session.bus.push("turn", {"phase": "resolving",
                                   "turn_id": int((snap0.values or {}).get("turn_id", 0))})
+        loop = asyncio.get_running_loop()
+
+        def _run() -> None:
+            # 同步 stream 在 executor 线程执行（SqliteSaver 不支持 async 图接口）；
+            # chunk 经 call_soon_threadsafe 回投事件循环，由 bus 分发。
+            try:
+                for chunk in session.graph.stream(inp, session.config,
+                                                  stream_mode="custom"):
+                    if isinstance(chunk, dict) and ("text" in chunk or "reset" in chunk):
+                        loop.call_soon_threadsafe(session.bus.push, "token", dict(chunk))
+            except Exception as exc:  # 图执行意外崩溃：提示但保留会话（可重连续玩）
+                loop.call_soon_threadsafe(
+                    session.bus.push, "error", {"message": f"图执行失败：{exc}"})
+
         try:
-            async for chunk in session.graph.astream(inp, session.config,
-                                                     stream_mode="custom"):
-                if isinstance(chunk, dict) and ("text" in chunk or "reset" in chunk):
-                    session.bus.push("token", dict(chunk))
-        except Exception as exc:      # 图执行意外崩溃：提示但保留会话（可重连续玩）
-            session.bus.push("error", {"message": f"图执行失败：{exc}"})
+            await asyncio.to_thread(_run)
         finally:
             session.driving = False
         self._push_snapshot(session)
@@ -3066,6 +3083,8 @@ Expected: PASS —— 新用例全绿；M2 回归全绿（db.py 改动不影响�
 git add backend/app/api/session.py backend/app/storage/db.py backend/app/graph/main.py backend/pyproject.toml backend/tests/api/test_session.py
 git commit -m "feat(api): room session manager driving graph via custom stream with windows and resync"
 ```
+
+> **交付记录（2026-10-03）**：实测探测驱动 4 处计划修正。① **`astream` 不可用**：`graph.astream` + 同步 `SqliteSaver` 运行时报「does not support async methods」→ `_drive` 改为同步 `graph.stream(stream_mode="custom")` 在 `asyncio.to_thread` 执行 + `call_soon_threadsafe` 回投事件循环（与 M3-1/3 已验证的同步流式路径一致）；② **摘要线程抢脚本队列**：`queue.start()` 后回合完成即触发摘要调用（默认 `extractor_model` 与主对话同名），实测开场变 3 次调用、主流程错位 → 测试 fixture 设 `extractor_model="qwen-extract"` 隔离（未知模型异常由后台队列吞掉）；③ **测试订阅时序**：actor 广播须先订阅 → `collect_until(sub, ...)` 由调用方先 subscribe；④ **budget_probe 补（规格 §9 检查点②）**：`_assemble` 补 `make_repo_budget_probe`（与 CLI 一致）。另：db.py 已等价（未改）；`build_checkpointer` 加 `PRAGMA busy_timeout=5000`；pyproject 加 `asyncio_mode="auto"`。验收：新增 3 例先红后绿（跑红 `ModuleNotFoundError: app.api.session`），目标组（api+graph+storage+rules+cli）`156 passed, 1 skipped`，全量 `214 passed, 1 skipped`。
 
 ---
 
