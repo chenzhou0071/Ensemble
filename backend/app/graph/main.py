@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 def build_checkpointer(sqlite_path: str) -> SqliteSaver:
     """SqliteSaver：CLI 重启后仍可恢复挂起的回合（断点续玩）。"""
     conn = sqlite3.connect(sqlite_path, check_same_thread=False)
+    conn.execute("PRAGMA busy_timeout=5000")   # 与 repo 连接并发写：等待而非立即失败
     saver = SqliteSaver(conn)
     saver.setup()
     return saver
