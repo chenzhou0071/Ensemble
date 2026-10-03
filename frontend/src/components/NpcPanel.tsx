@@ -1,14 +1,19 @@
-export default function NpcPanel({ sceneNpcs, npcNames }: {
+export default function NpcPanel({ sceneNpcs, knownNpcs, npcNames }: {
   sceneNpcs: string[];
+  knownNpcs: string[];
   npcNames: Record<string, string>;
 }) {
-  if (sceneNpcs.length === 0) return null;
+  const known = sceneNpcs.filter((id) => knownNpcs.includes(id));
   return (
     <section className="panel">
-      <h3>在场 NPC</h3>
-      <ul>
-        {sceneNpcs.map((id) => <li key={id}>{npcNames[id] ?? id}</li>)}
-      </ul>
+      <h3>已结识人物</h3>
+      {known.length === 0
+        ? <p className="muted">本场景暂无已结识的人物</p>
+        : (
+          <ul>
+            {known.map((id) => <li key={id}>{npcNames[id] ?? id}</li>)}
+          </ul>
+        )}
     </section>
   );
 }

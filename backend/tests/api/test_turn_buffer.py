@@ -19,6 +19,15 @@ def test_single_player_debounce_then_close():
     assert buf.phase == "idle"
 
 
+def test_single_player_never_times_out_without_submission():
+    """单人：未提交时永不超时（挂机等待输入，不自动空跑消耗）；多人仍按窗口超时推进。"""
+    buf = TurnBuffer(window_seconds=60.0)
+    buf.open(1, ["p1"], now=100.0)
+    assert not buf.should_close(now=1000.0, window_started=100.0)
+    assert not buf.should_close(now=100000.0, window_started=100.0)
+    assert buf.phase == "collecting"
+
+
 def test_resubmit_overwrites_before_close():
     buf = TurnBuffer(single_player_debounce_seconds=0.0)
     buf.open(1, ["p1"], now=0.0)

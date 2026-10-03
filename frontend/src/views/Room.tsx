@@ -69,7 +69,8 @@ export default function Room({ session, onLeave }: {
                          npcNames={npcNames} />
         <aside className="room-side">
           <CharacterPanel characters={state.characters as never[]} />
-          <NpcPanel sceneNpcs={state.scene?.npcs ?? []} npcNames={npcNames} />
+          <NpcPanel sceneNpcs={state.scene?.npcs ?? []} knownNpcs={state.knownNpcs}
+                    npcNames={npcNames} />
           <CluePanel clues={state.clues} />
           <DiceLogPanel diceLog={state.diceLog} />
         </aside>

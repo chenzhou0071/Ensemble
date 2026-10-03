@@ -95,6 +95,48 @@ async def test_opening_then_round_trip(room):
     await manager.close()
 
 
+async def test_state_payload_lists_only_acquainted_npcs(room):
+    """已结识人物 = 叙事中出现过台词的 NPC（说过话 = 认识，含开场叙事；用户需求 2026-10-03）。
+
+    GM 台词走 [[npc:id]]...[[/npc]] 标记语法（parse_segments 解析为 npc 分段）；
+    没开过口的 NPC 不进名单。
+    """
+    repo, settings, campaign, player = room
+    factory = script_factory([OPENING_DECIDE, "雾气笼罩着广场。",
+                              TURN_DECIDE, "[[npc:elder]]你们终于来了。[[/npc]]"])
+    manager = SessionManager(AppDeps(settings=settings, repo=repo, model_factory=factory))
+    session = await manager.ensure_started(campaign.id)
+    assert manager.resync_payload(session)["known_npcs"] == []    # 开场无台词：无人开口
+
+    sub = session.bus.subscribe("__test__")
+    try:
+        status = await manager.handle_submit(campaign.id, player.id, "我环顾四周")
+        assert status == "accepted"
+        events = await collect_until(sub, lambda evts: any(
+            e.type == "turn" and e.payload.get("phase") == "collecting"
+            and e.payload.get("turn_id") == 2 for e in evts))
+    finally:
+        session.bus.unsubscribe(sub)
+    states = [e for e in events if e.type == "state"]
+    assert states and states[-1].payload["known_npcs"] == ["elder"]   # 开口后进名单
+    await manager.close()
+
+
+async def test_single_player_window_never_auto_closes_on_timeout(room):
+    """单人挂机不超时：窗口超时已过仍停留在 collecting，不产生空跑回合（用户需求 2026-10-03）。"""
+    repo, settings, campaign, player = room      # turn_window_seconds=3.0
+    factory = script_factory([OPENING_DECIDE, "雾气笼罩着广场。"])
+    manager = SessionManager(AppDeps(settings=settings, repo=repo, model_factory=factory))
+    session = await manager.ensure_started(campaign.id)
+    assert session.buffer.phase == "collecting"
+
+    await asyncio.sleep(3.5)                     # 已超过 3.0s 窗口
+    assert session.buffer.phase == "collecting"
+    snap = session.graph.get_state(session.config)
+    assert int((snap.values or {}).get("turn_id", 0)) == 1   # 未空跑推进
+    await manager.close()
+
+
 async def test_ensure_started_is_idempotent(room):
     repo, settings, campaign, player = room
     factory = script_factory([OPENING_DECIDE, "开场。"])

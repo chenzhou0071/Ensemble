@@ -62,6 +62,7 @@ class RoomSession:
     prev_scene: str | None = None
     last_clue_id: int = 0
     last_scene_id: int = 0
+    last_dice_id: int = 0
     window_task: asyncio.Task | None = None
     window_started: float = 0.0
 
@@ -203,8 +204,13 @@ class SessionManager:
             try:
                 for chunk in session.graph.stream(inp, session.config,
                                                   stream_mode="custom"):
-                    if isinstance(chunk, dict) and ("text" in chunk or "reset" in chunk):
+                    if not isinstance(chunk, dict):
+                        continue
+                    if "text" in chunk or "reset" in chunk:
                         loop.call_soon_threadsafe(session.bus.push, "token", dict(chunk))
+                    elif "dice" in chunk:      # 骰子先出：掷骰即推，先于叙事 token
+                        loop.call_soon_threadsafe(self._push_dice, session,
+                                                  dict(chunk["dice"]))
             except Exception as exc:  # 图执行意外崩溃：提示但保留会话（可重连续玩）
                 loop.call_soon_threadsafe(
                     session.bus.push, "error", {"message": f"图执行失败：{exc}"})
@@ -215,6 +221,13 @@ class SessionManager:
             session.driving = False
         self._push_snapshot(session)
 
+    def _push_dice(self, session: RoomSession, payload: dict) -> None:
+        """图内实时推送（resolve_checks 掷骰后立即，先于叙事 token）。"""
+        rid = payload.pop("id", None)
+        if rid is not None:
+            session.last_dice_id = max(session.last_dice_id, int(rid))
+        session.bus.push("dice", payload)
+
     def _push_snapshot(self, session: RoomSession) -> None:
         """驱动收口：从 L2 读权威结果推送，并决定下一步（开窗/暂停/结束）。"""
         snap = session.graph.get_state(session.config)
@@ -223,6 +236,9 @@ class SessionManager:
         for row in session.repo.list_dice_records(session.campaign_id,
                                                   session.branch_id,
                                                   turn_id=finished_turn):
+            if row.id is None or row.id <= session.last_dice_id:
+                continue   # 已实时推送：不重复（含失败不推进回合的重放防护）
+            session.last_dice_id = row.id
             session.bus.push("dice", _dice_payload(row))
         for event in session.repo.list_events(session.campaign_id, session.branch_id,
                                               types=["clue"]):
@@ -304,16 +320,23 @@ class SessionManager:
             if payload.get("clue_id") not in seen:
                 seen.add(payload.get("clue_id"))
                 clues.append(payload)
+        # 已结识人物：叙事里开口说过话的 NPC（含开场叙事；GM 台词经 [[npc:id]] 标记解析为分段）
+        spoken: set[str] = set()
         segments = []
         for event in session.repo.list_events(campaign_id, branch_id,
                                               types=["narration"]):
-            segments.extend(json.loads(event.payload_json).get("segments", []))
+            for seg in json.loads(event.payload_json).get("segments", []):
+                segments.append(seg)
+                speaker = seg.get("speaker", "")
+                if speaker.startswith("npc:"):
+                    spoken.add(speaker[4:])
         return {"campaign_id": campaign_id, "branch_id": branch_id,
                 "turn_id": int(values.get("turn_id", 0)),
                 "scene_id": values.get("scene_id"),
                 "characters": session.repo.list_characters_at(campaign_id, branch_id,
                                                               10**9),
                 "clues_revealed": clues,
+                "known_npcs": sorted(spoken),
                 "ending_reached": values.get("ending_reached"),
                 "segments": segments,
                 "cost_usd": session.repo.campaign_cost_total(campaign_id)}

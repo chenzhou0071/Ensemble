@@ -17,23 +17,25 @@ export type CluePayload = { clue_id: string; text: string };
 export type StatePayload = {
   campaign_id: string; branch_id: string; turn_id: number;
   scene_id: string | null; characters: unknown[]; clues_revealed: CluePayload[];
+  known_npcs: string[];
   ending_reached: string | null; cost_usd: number;
   segments?: Segment[]; dice?: DicePayload[]; phase?: string;
 };
 export type NoticePayload = { message?: string; kind?: string; status?: string };
 export type ErrorPayload = { message: string };
 
+type WsEventBase = { seq: number; visibility: string; replay?: boolean };
+
 export type WsEvent =
-  | { seq: number; type: "token"; visibility: string; payload: TokenPayload }
-  | { seq: number; type: "dice"; visibility: string; payload: DicePayload }
-  | { seq: number; type: "actor"; visibility: string;
-      payload: { player_id: string; text: string } }
-  | { seq: number; type: "scene"; visibility: string; payload: ScenePayload }
-  | { seq: number; type: "turn"; visibility: string; payload: TurnPayload }
-  | { seq: number; type: "state"; visibility: string; payload: StatePayload }
-  | { seq: number; type: "clue"; visibility: string; payload: CluePayload }
-  | { seq: number; type: "notice"; visibility: string; payload: NoticePayload }
-  | { seq: number; type: "error"; visibility: string; payload: ErrorPayload };
+  | (WsEventBase & { type: "token"; payload: TokenPayload })
+  | (WsEventBase & { type: "dice"; payload: DicePayload })
+  | (WsEventBase & { type: "actor"; payload: { player_id: string; text: string } })
+  | (WsEventBase & { type: "scene"; payload: ScenePayload })
+  | (WsEventBase & { type: "turn"; payload: TurnPayload })
+  | (WsEventBase & { type: "state"; payload: StatePayload })
+  | (WsEventBase & { type: "clue"; payload: CluePayload })
+  | (WsEventBase & { type: "notice"; payload: NoticePayload })
+  | (WsEventBase & { type: "error"; payload: ErrorPayload });
 
 export type ModuleInfo = { id: string; title: string; version: string; path: string };
 export type CampaignInfo = {

@@ -33,6 +33,15 @@ describe("reduceEvent", () => {
     expect(s.sceneId).toBe("square");
   });
 
+  it("tracks acquainted npcs from the authoritative state snapshot", () => {
+    const s = reduceEvent(initialState, evt("state", {
+      campaign_id: "c", branch_id: "b", turn_id: 2, scene_id: "square",
+      characters: [], clues_revealed: [], ending_reached: null, cost_usd: 0.02,
+      known_npcs: ["elder"],
+    }));
+    expect(s.knownNpcs).toEqual(["elder"]);
+  });
+
   it("queues dice for animation and logs them", () => {
     const dice = { actor: "pc_p1", skill: "侦查", skill_value: 50,
                    difficulty: "regular", roll: 12, level: "hard",
@@ -40,6 +49,15 @@ describe("reduceEvent", () => {
     const s = reduceEvent(initialState, evt("dice", dice));
     expect(s.diceQueue).toHaveLength(1);
     expect(s.diceLog).toHaveLength(1);
+  });
+
+  it("replayed dice are logged but not queued for animation", () => {
+    const dice = { actor: "pc_p1", skill: "侦查", skill_value: 50,
+                   difficulty: "regular", roll: 12, level: "hard",
+                   seed: 1, success: true };
+    const s = reduceEvent(initialState, { ...evt("dice", dice), replay: true });
+    expect(s.diceLog).toHaveLength(1);       // 历史回填日志
+    expect(s.diceQueue).toHaveLength(0);     // 但不重播动画
   });
 
   it("deduplicates clues and tracks ending phase", () => {

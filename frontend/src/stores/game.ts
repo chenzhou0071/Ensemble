@@ -15,6 +15,7 @@ export type GameState = {
   sceneId: string | null;
   characters: unknown[];
   clues: CluePayload[];
+  knownNpcs: string[];
   diceLog: DicePayload[];
   diceQueue: DicePayload[];
   actors: { player_id: string; text: string }[];
@@ -33,6 +34,7 @@ export const initialState: GameState = {
   sceneId: null,
   characters: [],
   clues: [],
+  knownNpcs: [],
   diceLog: [],
   diceQueue: [],
   actors: [],
@@ -79,6 +81,7 @@ export function reduceEvent(state: GameState, evt: WsEvent): GameState {
         sceneId: p.scene_id,
         characters: p.characters,
         clues: p.clues_revealed,
+        knownNpcs: p.known_npcs ?? state.knownNpcs,
         costUsd: p.cost_usd,
         endingReached: p.ending_reached ?? state.endingReached,
       };
@@ -96,12 +99,11 @@ export function reduceEvent(state: GameState, evt: WsEvent): GameState {
       if (state.clues.some((c) => c.clue_id === evt.payload.clue_id)) return state;
       return { ...state, clues: [...state.clues, evt.payload] };
     }
-    case "dice":
-      return {
-        ...state,
-        diceLog: [...state.diceLog, evt.payload].slice(-20),
-        diceQueue: [...state.diceQueue, evt.payload],
-      };
+    case "dice": {
+      const diceLog = [...state.diceLog, evt.payload].slice(-20);
+      if (evt.replay) return { ...state, diceLog };   // 历史回放：只回填日志，不重播动画
+      return { ...state, diceLog, diceQueue: [...state.diceQueue, evt.payload] };
+    }
     case "actor":
       return { ...state, actors: [...state.actors, evt.payload].slice(-20) };
     case "notice":

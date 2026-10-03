@@ -1,4 +1,4 @@
-"""回合输入收集状态机：单人防抖、多人齐全即收、超时跳过、后发覆盖、间隙顺延。
+"""回合输入收集状态机：单人防抖（挂机不超时）、多人齐全即收、多人超时跳过、后发覆盖、间隙顺延。
 
 时间一律由调用方传入（now / window_started），便于测试注入与定时器复用。
 """
@@ -48,6 +48,8 @@ class TurnBuffer:
             if len(self.active_players) == 1 and self.last_submit_ts is not None:
                 return (now - self.last_submit_ts) >= self.single_player_debounce_seconds
             return True
+        if len(self.active_players) == 1:
+            return False    # 单人：未提交永不超时（挂机等待输入，避免自动空跑消耗）
         return (now - window_started) >= self.window_seconds
 
     def close(self) -> dict:
