@@ -121,7 +121,7 @@ async def switch_branch(campaign_id: str, req: SwitchBranchRequest, request: Req
     if branch is None or branch.campaign_id != campaign_id:
         raise HTTPException(status_code=400, detail="branch not in campaign")
     deps.repo.switch_branch(campaign_id, req.branch_id)
-    if deps.manager is not None:
+    if deps.manager is not None and deps.manager.has(campaign_id):
         await deps.manager.on_branch_switch(campaign_id)
     return {"active_branch_id": req.branch_id}
 
@@ -150,6 +150,6 @@ async def restore_campaign(campaign_id: str, req: RestoreRequest, request: Reque
     deps.repo.create_branch(campaign_id, name, fork_turn_id=req.turn_id,
                             parent_branch_id=src)
     deps.repo.switch_branch(campaign_id, dst)
-    if deps.manager is not None:
+    if deps.manager is not None and deps.manager.has(campaign_id):
         await deps.manager.on_branch_switch(campaign_id)
     return {"branch_id": dst, "name": name}

@@ -84,6 +84,10 @@ class SessionManager:
             raise KeyError(campaign_id)
         return session
 
+    def has(self, campaign_id: str) -> bool:
+        """是否存在活跃会话（REST 切换分支时仅需通知有会话的战役）。"""
+        return campaign_id in self._sessions
+
     # ---------- 生命周期 ----------
 
     def _assemble(self, campaign_id: str) -> RoomSession:
