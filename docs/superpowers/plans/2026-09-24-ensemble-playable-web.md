@@ -3375,8 +3375,9 @@ git commit -m "feat(api): websocket endpoint with replay/resync and full app wir
 
 **Files:**
 - Create: `frontend/package.json`, `frontend/vite.config.ts`, `frontend/tsconfig.json`, `frontend/index.html`
-- Create: `frontend/src/main.tsx`, `frontend/src/styles.css`, `frontend/src/test-setup.ts`
+- Create: `frontend/src/main.tsx`, `frontend/src/App.tsx`（最小占位；M3-13/14 替换为大厅/房间视图）, `frontend/src/styles.css`, `frontend/src/test-setup.ts`
 - Create: `frontend/src/types.ts`, `frontend/src/api/rest.ts`, `frontend/src/api/ws.ts`
+- Modify: `.gitignore`（补 `dist/` 与 `*.tsbuildinfo`）
 - Test: `frontend/src/api/__tests__/rest.test.ts`、`frontend/src/api/__tests__/ws.test.ts`
 
 **Interfaces:**
@@ -3481,9 +3482,9 @@ export default defineConfig({
 </html>
 ```
 
-`frontend/src/test-setup.ts`：
+`frontend/src/test-setup.ts`（vitest 专用入口：主入口依赖全局 expect，与 `globals: false` 冲突）：
 ```ts
-import "@testing-library/jest-dom";
+import "@testing-library/jest-dom/vitest";
 ```
 
 `frontend/src/main.tsx`（**不用 StrictMode**：避免开发模式双挂载造成 WS 双连接；备注在文件头）：
@@ -3864,9 +3865,11 @@ Expected: PASS（6 passed）；build 成功（tsc 无类型错误）
 - [ ] **Step 6: Commit**
 
 ```bash
-git add frontend
+git add frontend .gitignore
 git commit -m "feat(frontend): vite scaffold with typed rest client and reconnecting ws client"
 ```
+
+> **交付记录（2026-10-03）**：实现与计划一致（types/rest/ws 零修正），另含 3 处实测驱动的计划修正。① **补 App.tsx 占位**：计划 Files 未列但 `main.tsx` 引用且 Step 5 的 build 校验需要（否则 tsc 报模块缺失）→ 补最小占位，标注 M3-13/14 替换；② **test-setup 换 vitest 专用入口**：`@testing-library/jest-dom` 主入口内部 `expect.extend` 依赖全局 expect，与 `globals: false` 冲突（实测 `ReferenceError: expect is not defined`，2 个测试文件全挂）→ 改 `@testing-library/jest-dom/vitest`；③ **.gitignore 补 `dist/` + `*.tsbuildinfo`**：vite 构建产物与 tsc 增量缓存不应入库（git add --dry-run 实测会带上）。验收：跑红 `Failed to resolve import "../rest"`（与预期一致）；跑绿 `6 passed`（rest 3 + ws 3）；`npm run build` 成功（tsc 无类型错误，产出 142.5 KB JS / 1.7 KB CSS）。
 
 ---
 
