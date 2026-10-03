@@ -4417,7 +4417,7 @@ git commit -m "feat(frontend): lobby with campaign create/continue and room shel
 - Modify: `backend/app/api/routes.py`（追加 `GET /campaigns/{id}/module`：NPC 名字、结局条件——纯展示信息）
 - Modify: `frontend/src/types.ts`（`ModuleDetail`）、`frontend/src/api/rest.ts`（`api.module`）
 - Create: `frontend/src/components/NarrationStream.tsx`、`frontend/src/components/InputBar.tsx`
-- Modify: `frontend/src/views/Room.tsx`（完整实现）、`frontend/src/styles.css`（notice 样式）
+- Modify: `frontend/src/views/Room.tsx`（完整实现）、`frontend/src/styles.css`（notice 样式）、`frontend/src/test-setup.ts`（globals: false 下 RTL 显式 cleanup）
 - Test: `backend/tests/api/test_campaigns_api.py`（追加 1 用例）、`frontend/src/components/__tests__/NarrationStream.test.tsx`、`frontend/src/views/__tests__/Room.test.tsx`
 
 **Interfaces:**
@@ -4719,7 +4719,7 @@ export default function Room({ session, onLeave }: {
 
 Run: `cd backend; uv run pytest tests/api/test_campaigns_api.py -q`
 Run: `cd frontend; npm run test; npm run build`
-Expected: PASS（前端 13 passed）；build 成功
+Expected: 后端 6 passed（另跑全量 217 passed 含新增 1）；前端 18 passed（16 既有 + 4 新增）；build 成功
 
 - [ ] **Step 6: Commit**
 
@@ -4727,6 +4727,8 @@ Expected: PASS（前端 13 passed）；build 成功
 git add backend/app/api/routes.py backend/tests/api/test_campaigns_api.py frontend/src
 git commit -m "feat(frontend): room with live narration stream, input bar and module npc names"
 ```
+
+> **交付记录（2026-10-03）**：前后端均 TDD 全流程。后端跑红（/module 404 → `KeyError: 'id'`）→ 跑绿（全量 217 passed, 1 skipped，含新增 1 例）；前端跑红（NarrationStream resolve 失败 + Room 2 例断言失败）→ 跑绿 6 files / 18 passed + build 成功（153.64 KB JS）。**修正 1 处计划遗漏（真实 bug）**：vitest `globals: false` 下 RTL 自动 cleanup 不生效（其 auto-cleanup 依赖全局 afterEach），首个 Room 用例 DOM 残留导致第二用例 "Found multiple elements"——test-setup.ts 补 `afterEach(() => cleanup())` 显式清理（此前 Lobby 测试侥幸未触发）。**修正 1 处笔误**：Step 5 预期原写 "前端 13 passed"，实际 18（16 既有 + 4 新增）。
 
 ---
 
