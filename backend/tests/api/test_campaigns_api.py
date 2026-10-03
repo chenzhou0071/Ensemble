@@ -29,3 +29,13 @@ def test_get_campaign_detail(client):
 def test_get_campaign_404(client):
     c, _ = client
     assert c.get("/api/campaigns/ghost").status_code == 404
+
+def test_campaign_module_exposes_npc_names(client):
+    c, repo = client
+    cid = c.post("/api/campaigns", json={"module_id": "misty_hollow",
+                                         "title": "x"}).json()["campaign_id"]
+    d = c.get(f"/api/campaigns/{cid}/module").json()
+    assert d["id"] == "misty_hollow"
+    names = {n["id"]: n["name"] for n in d["npcs"]}
+    assert names.get("elder")                       # 名字非空
+    assert all(e["id"] and e["condition"] for e in d["endings"])

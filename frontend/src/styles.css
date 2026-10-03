@@ -42,3 +42,5 @@ input, select {
 .conn-badge { font-size: 12px; padding: 2px 8px; border-radius: 10px;
   background: #3d2b2b; }
 .conn-badge.open { background: #25402b; }
+.notice-banner { background: #21303d; border: 1px solid #3b5a72;
+  padding: 6px 12px; border-radius: 6px; margin: 8px 16px 0; }

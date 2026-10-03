@@ -1,5 +1,5 @@
 import type {
-  CampaignDetail, CampaignInfo, CreateResult, ModuleInfo, Timeline,
+  CampaignDetail, CampaignInfo, CreateResult, ModuleDetail, ModuleInfo, Timeline,
 } from "../types";
 
 async function jsonFetch<T>(url: string, init?: RequestInit): Promise<T> {
@@ -35,4 +35,5 @@ export const api = {
     postJson<{ branch_id: string; name: string }>(`/api/campaigns/${id}/restore`, {
       turn_id: turnId,
     }),
+  module: (id: string) => jsonFetch<ModuleDetail>(`/api/campaigns/${id}/module`),
 };

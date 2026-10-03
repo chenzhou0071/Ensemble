@@ -54,3 +54,8 @@ export type BranchInfo = {
   fork_turn_id: number | null; completed_turns: number; created_at: string;
 };
 export type Timeline = { active_branch_id: string; branches: BranchInfo[] };
+export type ModuleDetail = {
+  id: string; title: string;
+  npcs: { id: string; name: string }[];
+  endings: { id: string; condition: string }[];
+};

@@ -153,3 +153,20 @@ async def restore_campaign(campaign_id: str, req: RestoreRequest, request: Reque
     if deps.manager is not None and deps.manager.has(campaign_id):
         await deps.manager.on_branch_switch(campaign_id)
     return {"branch_id": dst, "name": name}
+
+
+@router.get("/campaigns/{campaign_id}/module")
+def campaign_module(campaign_id: str, request: Request):
+    deps = _deps(request)
+    try:
+        campaign = deps.repo.get_campaign(campaign_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="campaign not found")
+    from app.content.loader import load_module
+    from app.content.registry import find_module_path
+    module = load_module(find_module_path(deps.settings.modules_dir,
+                                          campaign.module_id))
+    return {"id": module.meta.id, "title": module.meta.title,
+            "npcs": [{"id": n.id, "name": n.name} for n in module.npcs],
+            "endings": [{"id": e.id, "condition": e.condition}
+                        for e in module.endings]}
