@@ -6,7 +6,7 @@ from pathlib import Path
 
 from langgraph.types import Command
 
-from app.config import Settings, load_pricing, load_settings
+from app.config import Settings, load_pricing, load_settings, resolve_resource_path
 from app.content.loader import load_module
 from app.graph.main import build_checkpointer, build_game_graph
 from app.llm.client import LLMClient, make_repo_budget_probe
@@ -45,10 +45,7 @@ def assemble(settings: Settings, module_path: str | Path) -> AppContext:
     init_db(repo.engine)
     module = load_module(module_path)
     # 定价表路径：CWD 相对优先；找不到则回退仓库根（CLI 常在 backend/ 下运行）
-    pricing_path = Path(settings.pricing_path)
-    if not pricing_path.exists():
-        pricing_path = Path(__file__).resolve().parents[2] / settings.pricing_path
-    pricing = load_pricing(pricing_path)
+    pricing = load_pricing(resolve_resource_path(settings.pricing_path))
     guard = BudgetGuard(settings)
     client = LLMClient(settings, pricing, usage_sink=repo,
                        budget_probe=make_repo_budget_probe(repo, guard))

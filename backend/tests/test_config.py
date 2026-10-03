@@ -1,5 +1,5 @@
 from pathlib import Path
-from app.config import load_pricing, load_settings
+from app.config import load_pricing, load_settings, resolve_resource_path
 
 def test_defaults_and_env_override(monkeypatch):
     monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
@@ -36,3 +36,14 @@ def test_repo_pricing_covers_routed_models():
     s = load_settings()
     routed = {s.gm_model, s.cheap_model, s.npc_model, s.extractor_model}
     assert routed <= set(pricing.models)
+
+
+def test_resolve_resource_path_prefers_cwd_then_repo_root(tmp_path, monkeypatch):
+    # CWD 相对优先：存在即用（返回绝对路径）
+    (tmp_path / "local.yaml").write_text("x", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    assert resolve_resource_path("local.yaml") == (tmp_path / "local.yaml").resolve()
+    # 找不到则回退仓库根（服务/CLI 常在 backend/ 下运行）
+    repo_root = Path(__file__).resolve().parents[2]
+    assert (resolve_resource_path("config/pricing.yaml")
+            == (repo_root / "config" / "pricing.yaml").resolve())

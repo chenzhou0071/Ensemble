@@ -20,6 +20,20 @@ def load_pricing(path: str | Path) -> Pricing:
     return Pricing.model_validate(raw)
 
 
+_REPO_ROOT = Path(__file__).resolve().parents[2]   # backend/app/config.py → 仓库根
+
+
+def resolve_resource_path(path: str | Path) -> Path:
+    """资源路径解析：CWD 相对优先（存在即用），否则回退仓库根；返回绝对路径。
+
+    服务/CLI 常在 backend/ 下运行，默认的 "config/pricing.yaml" 相对 CWD
+    并不存在（config/ 在仓库根），需回退。"""
+    p = Path(path)
+    if not p.exists():
+        p = _REPO_ROOT / p
+    return p.resolve()
+
+
 class Settings(BaseModel):
     sqlite_path: str = "ensemble.db"
     pricing_path: str = "config/pricing.yaml"
