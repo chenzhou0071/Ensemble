@@ -55,3 +55,11 @@ def test_replay_reports_gap_when_buffer_trimmed():
     assert gap is True
     events2, gap2 = bus.replay(1, "p1")
     assert gap2 is False and [e.seq for e in events2] == [2, 3]
+
+
+def test_replay_reports_gap_when_since_seq_beyond_current():
+    """服务重启后旧代 seq（客户端 lastSeq 超过新总线进度）须全量 resync。"""
+    bus = EventBus()
+    bus.push("token", {"text": "1"})
+    events, gap = bus.replay(99, "p1")
+    assert events == [] and gap is True

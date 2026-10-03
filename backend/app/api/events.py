@@ -59,7 +59,11 @@ class EventBus:
             self._subscribers.remove(sub)
 
     def replay(self, since_seq: int, player_id: str) -> tuple[list[WsEvent], bool]:
-        """该玩家可见的增量事件 + gap 标志（缓冲被截断时调用方应全量 resync）。"""
+        """该玩家可见的增量事件 + gap 标志（缓冲被截断或 seq 断代时调用方应全量 resync）。
+
+        seq 断代：客户端 lastSeq 超过本总线进度（如服务重启后客户端未刷新、自动重连），
+        此时增量空洞无法回填，必须全量对齐。"""
         events = [e for e in self._buffer if e.seq > since_seq and e.visible_to(player_id)]
-        gap = bool(self._buffer) and self._buffer[0].seq > since_seq + 1
+        gap = (since_seq > self._seq
+               or (bool(self._buffer) and self._buffer[0].seq > since_seq + 1))
         return events, gap
