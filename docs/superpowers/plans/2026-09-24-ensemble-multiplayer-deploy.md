@@ -1,5 +1,7 @@
 # Ensemble 多人联机与部署（M4）实施计划
 
+> **⚠️ 已作废（2026-10-04）**：用户决定 M4 改为「单人一局」——邀请码 / 多人窗口 / 玩家栏 / 联机 E2E 全部取消，本文件仅存档案价值，**请勿按本文件执行**。现行计划见 `docs/superpowers/plans/2026-10-04-ensemble-m4-solo.md`（原 M4-5 暗骰平移为其 M4-2；原 M4-6 部署平移为其 M4-4）。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 让 Ensemble 支持多人同桌：邀请码加入、全员回合窗口、掉线不阻塞、暗骰可见性，并用同一套 docker-compose 部署到腾讯云（或本机）。

@@ -17,7 +17,7 @@
 - 战斗边界（YAGNI，规格 §14）：只做"攻击检定 → 防御掷骰 → 伤害 → HP/败亡"的单次结算；不做先攻排序、战斗轮循环、NPC 反击、武器/护甲表、战棋地图。攻击目标仅限**当前场景**内的 NPC，攻击者仅限玩家角色。
 - `/metrics` 为 JSON 端点（不引入 Prometheus）；进程内计数器重启清零并在响应中声明；traces JSONL 字段固定为 `run_id / parent_run_id / name / run_type / inputs / outputs / start_time / end_time / error`。
 - 兼容性：既有 `WsEvent` / `TurnBuffer` / `secret` 机制不改语义；前端新增字段一律可选（`bonus?: number`），不破坏 M3/M4 已定测试数据。
-- 前置依赖：M2（Task 1-24）、M3（T1-T17）、M4（M4-1~M4-7）全部完成且 `uv run pytest` 全绿；本计划按任务号顺序执行（多个任务触碰同一文件：`session.py` / `llm/client.py` / `turn.py` / `gm.py`，线性执行避免交叉合并）。
+- 前置依赖：M2（Task 1-24）、M3（T1-T17）、M4（单人版 M4-1~M4-4，见 `2026-10-04-ensemble-m4-solo.md`）全部完成且 `uv run pytest` 全绿；本计划按任务号顺序执行（多个任务触碰同一文件：`session.py` / `llm/client.py` / `turn.py` / `gm.py`，线性执行避免交叉合并）。
 
 ---
 
@@ -583,13 +583,12 @@ class _FakeGraph:
     def get_state(self, config):
         return SimpleNamespace(values=self._values)
 
-    async def astream(self, inp, config, stream_mode=None):
+    def stream(self, inp, config, stream_mode=None):    # 同步流：_drive 在 executor 线程消费
         yield {"text": "……"}
 
 
 class _FakeSession:
     def __init__(self, tracer):
-        self.driving = False
         self.campaign_id = "c1"
         self.branch_id = "b1"
         self.tracer = tracer
@@ -809,7 +808,7 @@ import 追加（`from app.memory.graphiti import build_memory` 之后）：
 from app.obs.tracer import Tracer, make_tracer
 ```
 
-`RoomSession` 在 `window_started: float = 0.0` 之后追加字段：
+`RoomSession` 在 `drive_task: asyncio.Task | None = None` 之后追加字段（M4 单人版已删 `window_started` / `window_task`）：
 ```python
     tracer: Tracer | None = None
 ```
@@ -827,13 +826,13 @@ from app.obs.tracer import Tracer, make_tracer
             branch_id=campaign.active_branch_id, tracer=tracer)
 ```
 
-`_drive` 方法整体替换为：
+`_drive` 方法整体替换为（基于 M4 单人版后的实现：同步 `stream` 在 executor 线程消费、`_push_dice` 实时推骰、无 `driving` 状态；此处新增 tracer 包裹）：
 ```python
     async def _drive(self, session: RoomSession, inp) -> None:
-        session.driving = True
         snap0 = session.graph.get_state(session.config)
         turn_id0 = int((snap0.values or {}).get("turn_id", 0))
         session.bus.push("turn", {"phase": "resolving", "turn_id": turn_id0})
+        loop = asyncio.get_running_loop()
         tracer = session.tracer
         run_id: str | None = None
         started = time.perf_counter()
@@ -844,16 +843,27 @@ from app.obs.tracer import Tracer, make_tracer
                                               "turn_id": turn_id0})
             tracer.current_turn_run_id = run_id
         drive_error: str | None = None
-        try:
-            async for chunk in session.graph.astream(inp, session.config,
-                                                     stream_mode="custom"):
-                if isinstance(chunk, dict) and ("text" in chunk or "reset" in chunk):
-                    session.bus.push("token", dict(chunk))
-        except Exception as exc:      # 图执行意外崩溃：提示但保留会话（可重连续玩）
-            drive_error = str(exc)
-            session.bus.push("error", {"message": f"图执行失败：{exc}"})
-        finally:
-            session.driving = False
+
+        def _run() -> None:
+            # 同步 stream 在 executor 线程执行（SqliteSaver 不支持 async 图接口）；
+            # chunk 经 call_soon_threadsafe 回投事件循环，由 bus 分发。
+            nonlocal drive_error
+            try:
+                for chunk in session.graph.stream(inp, session.config,
+                                                  stream_mode="custom"):
+                    if not isinstance(chunk, dict):
+                        continue
+                    if "text" in chunk or "reset" in chunk:
+                        loop.call_soon_threadsafe(session.bus.push, "token", dict(chunk))
+                    elif "dice" in chunk:      # 骰子先出：掷骰即推，先于叙事 token
+                        loop.call_soon_threadsafe(self._push_dice, session,
+                                                  dict(chunk["dice"]))
+            except Exception as exc:  # 图执行意外崩溃：提示但保留会话（可重连续玩）
+                drive_error = str(exc)
+                loop.call_soon_threadsafe(
+                    session.bus.push, "error", {"message": f"图执行失败：{exc}"})
+
+        await asyncio.to_thread(_run)
         if tracer is not None and run_id is not None:
             values = (session.graph.get_state(session.config).values) or {}
             tracer.finish_run(run_id, outputs={
@@ -887,7 +897,7 @@ Expected: PASS —— 全量回归；默认 `traces_dir=""`（tracer=None），�
 
 - [ ] **Step 9: 更新 .env.example 与 README（三开关 + 手测）**
 
-`.env.example` 追加（在 M4-6 已有的两行密钥之后）：
+`.env.example` 追加（在 M4-4 已有的两行密钥之后）：
 ```bash
 # --- M5 可选开关（默认全部关闭，不影响既有行为） ---
 # 记忆后端：journal（默认）| graphiti（需要 uv sync --extra graph + Neo4j）
@@ -1068,13 +1078,12 @@ class _FakeGraph:
     def get_state(self, config):
         return SimpleNamespace(values=self._values)
 
-    async def astream(self, inp, config, stream_mode=None):
+    def stream(self, inp, config, stream_mode=None):    # 同步流：_drive 在 executor 线程消费
         yield {"text": "……"}
 
 
 class _FakeSession:
     def __init__(self):
-        self.driving = False
         self.campaign_id = "c1"
         self.branch_id = "b1"
         self.tracer = None
@@ -1505,18 +1514,18 @@ git commit -m "feat(obs): /metrics with turn latency, llm success rate and fallb
 
 **Files:**
 - Modify: `backend/app/rules/dice.py`、`backend/app/rules/check.py`、`backend/app/storage/models.py`、`backend/app/storage/db.py`、`backend/app/storage/repo.py`、`backend/app/graph/schemas.py`、`backend/app/graph/nodes/turn.py`、`backend/app/graph/nodes/gm.py`、`backend/app/api/session.py`、`frontend/src/types.ts`、`frontend/src/components/DiceOverlay.tsx`、`frontend/src/components/DiceLogPanel.tsx`、`frontend/src/styles.css`
-- Test: 追加 `backend/tests/rules/test_dice.py`、`backend/tests/rules/test_check.py`、`backend/tests/graph/test_resolve_checks.py`、`backend/tests/storage/test_migration.py`（M4-1 已建，追加 2 例）、`frontend/src/components/__tests__/DiceOverlay.test.tsx`
+- Test: 追加 `backend/tests/rules/test_dice.py`、`backend/tests/rules/test_check.py`、`backend/tests/graph/test_resolve_checks.py`、`backend/tests/storage/test_migration.py`（M4-2 已建，追加 2 例）、`frontend/src/components/__tests__/DiceOverlay.test.tsx`
 
 **Interfaces:**
-- Consumes: `new_seed()` / `roll_d100(seed)`（M2 Task 2）、`CheckDifficulty` / `SuccessLevel` / `CheckResult` / `roll_check`（M2 Task 3）、`DiceRecordRow` / `make_engine`（M2 Task 4）、`SqliteRepository.add_dice_record / list_dice_records`（M2 Task 9）、`_skill_value` / `build_resolve_checks_node`（M2 Task 14）、`DECIDE_SYSTEM` / `_check_lines`（M2 Task 16）、`_dice_payload`（M3-11）、`DicePayload` / `DiceOverlay` / `DiceLogPanel`（M3-16）、`init_db` / `migrate_schema` / `_ensure_column`（M4-1）、暗骰 `secret` 链路（M4-4：`CheckRequest.secret`、`add_dice_record(secret=)`、`_check_lines` 暗骰标注、事件 `visibility="gm"`、`_push_snapshot`/`resync_payload` 过滤）
+- Consumes: `new_seed()` / `roll_d100(seed)`（M2 Task 2）、`CheckDifficulty` / `SuccessLevel` / `CheckResult` / `roll_check`（M2 Task 3）、`DiceRecordRow` / `make_engine`（M2 Task 4）、`SqliteRepository.add_dice_record / list_dice_records`（M2 Task 9）、`_skill_value` / `build_resolve_checks_node`（M2 Task 14）、`DECIDE_SYSTEM` / `_check_lines`（M2 Task 16）、`_dice_payload`（M3-11）、`DicePayload` / `DiceOverlay` / `DiceLogPanel`（M3-16）、`init_db` / `migrate_schema` / `_ensure_column` 与暗骰 `secret` 链路（M4-2：`CheckRequest.secret`、`add_dice_record(secret=)`、`_check_lines` 暗骰标注、事件 `visibility="gm"`、`_push_snapshot`/`resync_payload` 过滤）
 - Produces:
   - `roll_d100_with_bonus(seed: int, bonus: int = 0, penalty: int = 0) -> int`：`net = clamp(bonus - penalty, -2, +2)`；net > 0 连掷 net+1 个 d100 取最小、net < 0 取最大；net == 0 完全等价 `roll_d100(seed)`
   - `roll_check(actor, skill, skill_value, difficulty, seed, bonus: int = 0, penalty: int = 0) -> CheckResult`；`CheckResult` 尾部新增字段 `bonus / penalty`（存**夹紧后**生效值，各 0..2）
   - `bonus_note(bonus: int, penalty: int) -> str`：`"（奖励骰 ×1，惩罚骰 ×2） "` / `""`（事件文本、提示词行共用同一格式）
   - `_resolve_plain_check(repo, state, chk) -> dict`（自 `resolve_checks` 提取，**M5-7 战斗攻击复用**）；`check_results` 条目与 `check` 事件 payload 新增 `bonus / penalty` 键
   - `CheckRequest.bonus / CheckRequest.penalty: int = 0`（越界值在 rules 层夹紧，schema 不拒绝——LLM 小错不失败整回合）
-  - `migrate_schema` 追加两行 `_ensure_column`（复用 M4-1 机制，`init_db` 无需改动）：旧库 `dicerecordrow` 表补 `bonus / penalty INTEGER NOT NULL DEFAULT 0`
-  - 与 M4-4 的合并口径：`add_dice_record(..., seed, secret=False, bonus=0, penalty=0)`；`_resolve_plain_check` 同时透传 `secret` 与 `bonus/penalty` 且暗骰事件 `visibility="gm"` 保持；`_check_lines` / `DECIDE_SYSTEM` 保留暗骰内容并叠加奖惩说明
+  - `migrate_schema` 追加两行 `_ensure_column`（复用 M4-2 机制，`init_db` 无需改动）：旧库 `dicerecordrow` 表补 `bonus / penalty INTEGER NOT NULL DEFAULT 0`
+  - 与 M4-2 的合并口径：`add_dice_record(..., seed, secret=False, bonus=0, penalty=0)`；`_resolve_plain_check` 同时透传 `secret` 与 `bonus/penalty` 且暗骰事件 `visibility="gm"` 保持；`_check_lines` / `DECIDE_SYSTEM` 保留暗骰内容并叠加奖惩说明
   - `_dice_payload` 追加 `"bonus" / "penalty"`；前端 `DicePayload.bonus? / penalty?: number`（可选，M3 测试数据不破）
 - 语义约束：LLM 只输出"要不要给奖惩、几颗"（意图参数，0-2）；骰值与成败全部由纯函数计算；无奖惩时事件文本/提示词/前端渲染与既有输出**逐字符一致**。
 
@@ -1665,7 +1674,7 @@ Expected: PASS —— test_dice.py 8 passed（4 既有 + 4 新增）、test_chec
 
 - [ ] **Step 6: 写失败测试（存储迁移 + 检定节点）**
 
-`backend/tests/storage/test_migration.py`（M4-1 已建、M4-4 已追加 1 例）：import 区追加
+`backend/tests/storage/test_migration.py`（M4-2 已建、M4-3 已追加 1 例）：import 区追加
 ```python
 from app.storage.repo import SqliteRepository
 ```
@@ -1739,7 +1748,7 @@ Expected: FAIL —— `TypeError: add_dice_record() got an unexpected keyword ar
 
 - [ ] **Step 8: 实现存储层（models / db / repo）**
 
-1. `backend/app/storage/models.py`：`DiceRecordRow` 的 `secret` 行之后、`created_at` 之前追加两行（M4-4 已插入 `secret` 行，勿丢）：
+1. `backend/app/storage/models.py`：`DiceRecordRow` 的 `secret` 行之后、`created_at` 之前追加两行（M4-2 已插入 `secret` 行，勿丢）：
 ```python
     seed: int
     secret: bool = False          # 暗骰：L2 保留，但不对玩家可见
@@ -1748,13 +1757,13 @@ Expected: FAIL —— `TypeError: add_dice_record() got an unexpected keyword ar
     created_at: datetime = Field(default_factory=_now)
 ```
 
-2. `backend/app/storage/db.py`：`migrate_schema` 清单尾部追加两行（复用 M4-1 的 `_ensure_column`；`init_db` 已是 `create_all + migrate_schema`，无需改动）：
+2. `backend/app/storage/db.py`：`migrate_schema` 清单尾部追加两行（复用 M4-2 的 `_ensure_column`；`init_db` 已是 `create_all + migrate_schema`，无需改动）：
 ```python
 def migrate_schema(engine) -> None:
     """轻量迁移清单：每列一行，幂等可重复执行。"""
     with engine.begin() as conn:
-        _ensure_column(conn, "campaign", "invite_code",
-                       "invite_code VARCHAR NOT NULL DEFAULT ''")
+        _ensure_column(conn, "campaign", "owner_client_id",
+                       "owner_client_id VARCHAR NOT NULL DEFAULT ''")
         _ensure_column(conn, "dicerecordrow", "secret",
                        "secret BOOLEAN NOT NULL DEFAULT 0")
         _ensure_column(conn, "dicerecordrow", "bonus",
@@ -1763,23 +1772,27 @@ def migrate_schema(engine) -> None:
                        "penalty INTEGER NOT NULL DEFAULT 0")
 ```
 
-3. `backend/app/storage/repo.py`：`add_dice_record` 整体替换（保留 M4-4 的 `secret` 参数，签名尾部再加 `bonus / penalty`；insert 补两字段）：
+3. `backend/app/storage/repo.py`：`add_dice_record` 整体替换（保留 M4-2 的 `secret` 参数与 `-> int` 返回值，签名尾部再加 `bonus / penalty`；insert 补两字段）：
 ```python
     def add_dice_record(self, campaign_id: str, branch_id: str, turn_id: int, actor: str,
                         skill: str, skill_value: int, difficulty: str, roll: int,
                         level: str, seed: int, secret: bool = False,
-                        bonus: int = 0, penalty: int = 0) -> None:
+                        bonus: int = 0, penalty: int = 0) -> int:
         with Session(self.engine) as s:
-            s.add(DiceRecordRow(campaign_id=campaign_id, branch_id=branch_id, turn_id=turn_id,
+            row = DiceRecordRow(campaign_id=campaign_id, branch_id=branch_id, turn_id=turn_id,
                                 actor=actor, skill=skill, skill_value=skill_value,
                                 difficulty=difficulty, roll=roll, level=level, seed=seed,
-                                secret=secret, bonus=bonus, penalty=penalty))
+                                secret=secret, bonus=bonus, penalty=penalty)
+            s.add(row)
+            s.flush()
+            rid = int(row.id)
             s.commit()
+            return rid
 ```
 
 - [ ] **Step 9: 实现图节点层（schemas / turn / gm）**
 
-1. `backend/app/graph/schemas.py`：`CheckRequest` 整体替换（保留 M4-4 的 `secret` 字段）：
+1. `backend/app/graph/schemas.py`：`CheckRequest` 整体替换（保留 M4-2 的 `secret` 字段）：
 ```python
 class CheckRequest(BaseModel):
     actor: str
