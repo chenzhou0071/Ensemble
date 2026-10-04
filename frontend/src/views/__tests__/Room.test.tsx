@@ -1,4 +1,4 @@
-import { act, render, screen } from "@testing-library/react";
+import { act, render, screen, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import Room from "../Room";
@@ -45,6 +45,19 @@ describe("Room", () => {
     expect(clientMock.connect).toHaveBeenCalled();
   });
 
+  it("shows current scene name in sidebar between character and npc panels", () => {
+    render(<Room session={SESSION} onLeave={() => {}} />);
+    act(() => {
+      handlers.onEvent!({ seq: 1, type: "scene", visibility: "all",
+                          payload: { scene_id: "square", name: "镇中心广场",
+                                     description: "石砌广场。", npcs: [] } });
+    });
+    const side = screen.getByRole("complementary");
+    expect(within(side).getByText("镇中心广场")).toBeInTheDocument();
+    const headings = [...side.querySelectorAll("h3")].map((h) => h.textContent);
+    expect(headings).toEqual(["角色", "所在位置", "已结识人物", "线索（0）", "检定记录"]);
+  });
+
   it("disables input until collecting phase", () => {
     render(<Room session={SESSION} onLeave={() => {}} />);
     act(() => handlers.onStatus!("open"));
@@ -52,5 +65,16 @@ describe("Room", () => {
     act(() => handlers.onEvent!({ seq: 1, type: "turn", visibility: "all",
                                   payload: { phase: "collecting", turn_id: 1 } }));
     expect(screen.getByPlaceholderText("输入你的行动（回车提交）")).toBeEnabled();
+  });
+
+  it("shows story ending in narration without a popup overlay", () => {
+    render(<Room session={SESSION} onLeave={() => {}} />);
+    act(() => {
+      handlers.onStatus!("open");
+      handlers.onEvent!({ seq: 1, type: "turn", visibility: "all",
+                          payload: { phase: "ended", ending_reached: "ending_break" } });
+    });
+    expect(screen.queryByText("故事已抵达结局")).not.toBeInTheDocument();
+    expect(screen.getByPlaceholderText("故事已结束")).toBeDisabled();
   });
 });

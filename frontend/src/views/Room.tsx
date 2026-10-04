@@ -6,7 +6,6 @@ import CharacterPanel from "../components/CharacterPanel";
 import CluePanel from "../components/CluePanel";
 import DiceLogPanel from "../components/DiceLogPanel";
 import DiceOverlay from "../components/DiceOverlay";
-import EndingOverlay from "../components/EndingOverlay";
 import InputBar from "../components/InputBar";
 import NarrationStream from "../components/NarrationStream";
 import NpcPanel from "../components/NpcPanel";
@@ -43,10 +42,6 @@ export default function Room({ session, onLeave }: {
   const handleDicePlayed = useCallback(() => {
     useGame.getState().dicePlayed();
   }, []);
-  const endingCondition = useMemo(
-    () => moduleInfo?.endings.find((e) => e.id === state.endingReached)?.condition,
-    [moduleInfo, state.endingReached],
-  );
 
   return (
     <div className="room">
@@ -69,6 +64,12 @@ export default function Room({ session, onLeave }: {
                          npcNames={npcNames} />
         <aside className="room-side">
           <CharacterPanel characters={state.characters as never[]} />
+          {state.scene && (
+            <section className="panel">
+              <h3>所在位置</h3>
+              <p className="scene-name">{state.scene.name}</p>
+            </section>
+          )}
           <NpcPanel sceneNpcs={state.scene?.npcs ?? []} knownNpcs={state.knownNpcs}
                     npcNames={npcNames} />
           <CluePanel clues={state.clues} />
@@ -80,8 +81,6 @@ export default function Room({ session, onLeave }: {
                   onSubmit={(text) => clientRef.current?.sendInput(text)} />
       </footer>
       <DiceOverlay dice={state.diceQueue[0] ?? null} onDone={handleDicePlayed} />
-      <EndingOverlay endingReached={state.endingReached} condition={endingCondition}
-                     onLeave={onLeave} />
     </div>
   );
 }
