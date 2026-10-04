@@ -71,7 +71,7 @@ def _route_after_post_turn(state: GameState) -> str:
 def build_game_graph(repo, module, memory, client, guard, checkpointer=None):
     g = StateGraph(GameState)
     g.add_node("intake", build_intake_node(repo, module, guard))
-    g.add_node("gm_decide", build_decide_node(client, module))
+    g.add_node("gm_decide", build_decide_node(client, module, repo))
     g.add_node("validate", build_validate_node(client, module))
     g.add_node("resolve_checks",
                _guarded("resolve_failed", build_resolve_checks_node(repo)))

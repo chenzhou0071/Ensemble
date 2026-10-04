@@ -1,4 +1,6 @@
 """回合节点：intake / wait_input / resolve_checks / apply_transition / post_turn / fallback。"""
+import json
+
 from langgraph.types import interrupt
 
 from app.graph.narrative import stream_writer
@@ -94,7 +96,13 @@ def build_resolve_checks_node(repo):
                             "skill_value": r.skill_value, "level": str(r.level),
                             "success": r.success, "seed": r.seed,
                             "difficulty": str(r.difficulty)})
-        return {"check_results": results}
+        upd: dict = {"check_results": results}
+        # 结局动作的检定失败 → 本回合不收束（decide 判定时尚未掷骰，此处按结果纠正，
+        # 防"检定失败但结局盲发"；叙事与路由随之按未收束走）
+        decision = state.get("decision") or {}
+        if decision.get("ending_reached") and any(not r["success"] for r in results):
+            upd["decision"] = {**decision, "ending_reached": None}
+        return upd
 
     return resolve_checks
 
@@ -133,7 +141,16 @@ def build_post_turn_node(repo, memory, module=None):
             repo.add_event(campaign_id, branch_id, turn_id, type="scene_changed",
                            payload={"from_scene": old_scene, "to_scene": new_scene,
                                     "reason": transition.get("reason") or ""})
-        for clue_id in decision.get("clues_revealed", []):
+        clue_ids = decision.get("clues_revealed", [])
+        already: set = set()
+        if clue_ids:          # 懒查询：无提名时不查库
+            already = {json.loads(e.payload_json).get("clue_id")
+                       for e in repo.list_events(campaign_id, branch_id,
+                                                 types=["clue"])}
+        for clue_id in clue_ids:
+            if clue_id in already:
+                continue      # 已揭示过：不重复写事件与记忆（防 GM 重复提名）
+            already.add(clue_id)
             content = ""
             if module is not None:
                 try:

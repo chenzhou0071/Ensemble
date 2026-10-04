@@ -59,3 +59,28 @@ def test_fallback_clears_pending_keeps_error():
     upd = fallback({"error": "decision_invalid", "npc_reactions": {"a": {}}, "narration": "x"})
     assert upd["error"] == "decision_invalid"  # error 保留（调用方读取后由 wait_input 清除）
     assert upd["npc_reactions"] == {} and upd["narration"] == "" and upd["check_results"] == []
+
+
+class ClueMemory:
+    """记录线索记忆写入的 spy。"""
+
+    def __init__(self):
+        self.events = []
+
+    def update_summaries(self, *a):
+        pass
+
+    def write_event(self, campaign_id, branch_id, event):
+        self.events.append(event)
+
+
+def test_post_turn_skips_already_revealed_clue(repo, campaign):
+    """已揭示的线索不重复落库/写记忆：防 GM 重复提名造成 L2 重复事件。"""
+    mem = ClueMemory()
+    repo.add_event(campaign.id, campaign.active_branch_id, 1, type="clue",
+                   payload={"clue_id": "c1", "text": "旧"})
+    build_post_turn_node(repo, mem)(base_state(
+        campaign, decision={"clues_revealed": ["c1", "c2"], "scene_transition": None}))
+    clues = repo.list_events(campaign.id, campaign.active_branch_id, types=["clue"])
+    assert [json.loads(e.payload_json)["clue_id"] for e in clues] == ["c1", "c2"]
+    assert [e.type for e in mem.events] == ["clue"]   # 仅 c2 写记忆

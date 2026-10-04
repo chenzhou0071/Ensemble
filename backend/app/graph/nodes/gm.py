@@ -16,7 +16,7 @@ DECIDE_SYSTEM = (
     'proactive_npc_triggers(数组，元素 {"npc_id","trigger"})、'
     'scene_transition(null 或 {"to_scene","reason"})、'
     'clues_revealed(数组，元素为线索 id，仅当本回合玩家明确获得线索时填写)、'
-    'ending_reached(null 或模块给定结局 id，仅当叙事故意收束到结局时填写)、'
+    'ending_reached(null 或模块给定结局 id；命中结局条件时按收束规则必须填写)、'
     'attitude_deltas(数组，元素 {"npc_id","delta"(整数),"reason"}，仅当玩家行为在本回合实质影响了某在场 NPC 对你们的态度时给出，最多 2 条，否则空数组；npc_id 只能用当前场景内列出的；delta 按行为严重程度取 -15..15，拿不准就不给)、'
     'memory_queries(字符串数组)。\n'
     "规则：\n"
@@ -50,7 +50,29 @@ def _exit_label(module, scene_id: str) -> str:
         return scene_id
 
 
-def build_decide_node(client: LLMClient, module) -> Callable[[GameState], dict]:
+def _clue_block(state: GameState, module, scene, repo) -> str:
+    """线索清单：已掌握（供核对结局前置）+ 本场景待发现（供提名 clues_revealed）。"""
+    known_ids = {c.id for c in module.clues}
+    revealed: list[str] = []
+    if repo is not None:
+        for e in repo.list_events(state["campaign_id"], state["branch_id"], types=["clue"]):
+            cid = json.loads(e.payload_json).get("clue_id")
+            if cid in known_ids and cid not in revealed:
+                revealed.append(cid)
+    parts: list[str] = []
+    if revealed:
+        lines = "\n".join(f"- {cid}：{module.clue(cid).content}" for cid in revealed)
+        parts.append("玩家已掌握的线索（用于核对结局前置要求；不要重复填进 clues_revealed）：\n"
+                     f"{lines}\n")
+    pending = [cid for cid in scene.clues if cid not in revealed]
+    if pending:
+        lines = "\n".join(f"- {cid}：{module.clue(cid).content}" for cid in pending)
+        parts.append("本场景可发现的线索（仅当玩家行动确实发现时，才把这些 id 填进 "
+                     f"clues_revealed；未列出的不要填）：\n{lines}\n")
+    return "".join(parts)
+
+
+def build_decide_node(client: LLMClient, module, repo=None) -> Callable[[GameState], dict]:
     def gm_decide(state: GameState) -> dict:
         scene = module.scene(state["scene_id"])
         npc_lines = "\n".join(
@@ -67,15 +89,22 @@ def build_decide_node(client: LLMClient, module) -> Callable[[GameState], dict]:
             for i in state.get("player_inputs", [])
         ) or "（本回合为开场，无玩家行动）"
         ending_lines = "\n".join(f"- {e.id}：{e.condition}" for e in module.endings)
-        ending_block = (f"结局条件（仅当本回合玩家行动已实质达成某条时，"
-                        f"才允许收束并在 ending_reached 填对应 id）：\n{ending_lines}\n"
-                        if ending_lines else "")
+        ending_block = (
+            f"结局条件（命中即须收束）：\n{ending_lines}\n"
+            "收束规则：本回合玩家行动已实际执行某条结局条件描述的行动、且其前置要求已满足时"
+            "（前置可对照「玩家已掌握的线索」核对），必须把该结局 id 填进 ending_reached；"
+            "不得新增设定使条件落空，不得把已命中的结局动作改写为无效、被阻止或延迟。"
+            "若你认为该行动结果不确定而要求了检定，仍须照填 ending_reached"
+            "（检定成功则正式收束、失败则本回合不收束，系统自动处理）。\n"
+            if ending_lines else "")
+        clue_block = _clue_block(state, module, scene, repo)
         user = (
             f"当前场景：{scene.name}\n{scene.description}\n"
             f"可去场景：{exit_lines}\n"
             f"在场 NPC：\n{npc_lines}\n"
             f"玩家角色：\n{char_lines}\n"
             f"记忆上下文：\n{state.get('memory_context') or '（无）'}\n"
+            f"{clue_block}"
             f"{ending_block}"
             f"玩家行动：\n{inputs_txt}"
         )
@@ -223,11 +252,26 @@ def build_narrate_node(client: LLMClient, module, repo=None) -> Callable[[GameSt
         ending_line = ""
         decision = state.get("decision") or {}
         if decision.get("ending_reached"):
-            try:  # 结局收束指令：条件文案即收尾方向（M3-4 起 decision 才会带该字段）
-                ending_line = (f"结局收束（{decision['ending_reached']}）："
-                               f"{module.ending(decision['ending_reached']).condition}\n")
+            try:  # 终章指令：条件文案即收尾方向；要求写全"直接结果+余波"，并放宽篇幅
+                ending_line = (
+                    f"结局收束（{decision['ending_reached']}）："
+                    f"{module.ending(decision['ending_reached']).condition}\n"
+                    "这是故事的最后一幕。请写一段完整的终章叙事：先交代玩家行动带来的直接结果，"
+                    "再以余波笔法写清后续——这个地方与生活于此的人们接下来如何、相关 NPC 的结局、"
+                    "玩家角色自身的最终处境（可补足与剧本设定相称的后续）；让故事完整收束，"
+                    "不要停在动作发生的瞬间，也不要留下悬而未决的线索。"
+                    "本回合篇幅可放宽到 500 字左右。\n")
             except KeyError:
                 ending_line = ""
+        clue_line = ""
+        known_clues = {c.id for c in module.clues}
+        new_clues = list(dict.fromkeys(
+            cid for cid in (decision.get("clues_revealed") or []) if cid in known_clues))
+        if new_clues:
+            items = "\n".join(f"- {module.clue(cid).content}" for cid in new_clues)
+            clue_line = ("本回合玩家新发现的线索（须在叙事中自然呈现发现过程与内容；"
+                         "不要罗列清单、不要出现线索编号或规则术语）：\n"
+                         f"{items}\n")
         prev_line = _previous_narration_tail(state, repo)
         tail_instr = ("请接着开场白写下去（从玩家进入当前场景开始），不要复述开场白。"
                       if opener else "请输出本回合的完整叙事。")
@@ -239,6 +283,7 @@ def build_narrate_node(client: LLMClient, module, repo=None) -> Callable[[GameSt
             f"玩家行动：\n{inputs_txt}\n"
             f"检定结果：\n{_check_lines(state)}\n"
             f"NPC 反应：\n{_reaction_lines(state, module)}\n"
+            f"{clue_line}"
             f"{tail_instr}"
         )
         messages = [ChatMessage(role="system", content=NARRATE_SYSTEM),

@@ -1,4 +1,5 @@
 from app.config import Pricing, PricingEntry, Settings
+from app.content.schema import Module
 from app.graph.nodes.gm import DECIDE_SYSTEM, build_decide_node, build_validate_node
 from app.llm.client import LLMClient, LlmContext
 
@@ -98,6 +99,53 @@ def test_decide_prompt_lists_ending_conditions(campaign, mini_module):
     assert "ending_reached" in prompt                 # 与字段说明呼应
 
 
+def test_decide_prompt_requires_conclusion_on_ending_match(campaign, mini_module):
+    """结局硬规则进提示词：命中即须收束，不得新增设定使条件落空（防 LLM 拦回终结动作）。"""
+    client, built, _ = make_client(['{"intent_summary": "x"}'])
+    build_decide_node(client, mini_module)(base_state(campaign))
+    prompt = built["qwen3.8-flash"].calls[0][1].content
+    assert "命中即须收束" in prompt
+    assert "不得新增设定使条件落空" in prompt
+    assert "仍须照填 ending_reached" in prompt   # 带检定的结局动作也要填（按结果由系统裁决）
+
+
 def test_decide_system_documents_attitude_deltas():
     """好感度契约：LLM 只说方向与理由，数值由代码截断（设计 2026-09-26）。"""
     assert "attitude_deltas" in DECIDE_SYSTEM
+
+
+CLUE_MODULE = {
+    "meta": {"id": "clue_mod", "title": "线索模组"},
+    "opening": {"narration": "开场", "scene_id": "gate"},
+    "scenes": [{"id": "gate", "name": "村口", "npcs": ["guard"], "exits": ["tavern"],
+                "clues": ["c1", "c2"]},
+               {"id": "tavern", "name": "酒馆", "npcs": [], "exits": []}],
+    "npcs": [{"id": "guard", "name": "王守卫", "persona": "多疑的老兵",
+              "initial_attitude": 40}],
+    "clues": [{"id": "c1", "content": "壁炉灰里藏着一页烧焦的账册", "unlocks": []},
+              {"id": "c2", "content": "门缝里卡着一枚旧铜扣", "unlocks": []}],
+    "endings": [],
+}
+
+
+def test_decide_prompt_lists_scene_clues(campaign):
+    """线索清单进 decide 提示词：GM 需知道本场景可发现线索的 id 与内容才能提名揭示。"""
+    client, built, _ = make_client(['{"intent_summary": "x"}'])
+    module = Module.model_validate(CLUE_MODULE)
+    build_decide_node(client, module)(base_state(campaign))
+    prompt = built["qwen3.8-flash"].calls[0][1].content
+    assert "c1" in prompt and "烧焦的账册" in prompt   # 线索 id 与内容
+    assert "clues_revealed" in prompt                  # 与字段说明呼应
+
+
+def test_decide_prompt_separates_revealed_clues(repo, campaign):
+    """已揭示线索进「已掌握」块供核对结局前置，不进「可发现」清单（防重复提名）。"""
+    client, built, _ = make_client(['{"intent_summary": "x"}'])
+    module = Module.model_validate(CLUE_MODULE)
+    repo.add_event(campaign.id, campaign.active_branch_id, 1, type="clue",
+                   payload={"clue_id": "c1", "text": "…"})
+    build_decide_node(client, module, repo)(base_state(campaign))
+    prompt = built["qwen3.8-flash"].calls[0][1].content
+    known, _, pending = prompt.partition("本场景可发现的线索")
+    assert "玩家已掌握的线索" in known and "烧焦的账册" in known
+    assert "烧焦的账册" not in pending and "旧铜扣" in pending

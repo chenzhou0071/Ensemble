@@ -1,6 +1,7 @@
 from langgraph.graph import END, START, StateGraph
 
 from app.config import Pricing, PricingEntry, Settings
+from app.content.schema import Module
 from app.graph.nodes.gm import build_narrate_node
 from app.graph.state import GameState
 from app.llm.client import LLMClient
@@ -147,6 +148,7 @@ def test_narrate_streams_reset_on_retry(campaign, mini_module):
 
 
 def test_ending_instruction_in_prompt(campaign, mini_module):
+    """结局回合提示词：条件文案 + 终章要求（结局故事要讲全：直接结果与余波）。"""
     client, built = make_client(["结局叙事。"])
     state = base_state(campaign, decision={"ending_reached": "e1", "checks": [],
                                            "clues_revealed": [], "proactive_npc_triggers": [],
@@ -154,3 +156,31 @@ def test_ending_instruction_in_prompt(campaign, mini_module):
     build_narrate_node(client, mini_module)(state)
     prompt = built["qwen3.8-flash"].calls[0][1].content
     assert "揭开真相" in prompt                    # mini_module 结局 e1 的 condition
+    assert "终章叙事" in prompt                    # 要求完整的收尾故事
+    assert "余波" in prompt                        # 交代后续：此地、人物、玩家自身处境
+    assert "篇幅可放宽" in prompt                  # 终章不受 300 字上限
+
+
+NARRATE_CLUE_MODULE = {
+    "meta": {"id": "clue_mod", "title": "线索模组"},
+    "opening": {"narration": "开场", "scene_id": "gate"},
+    "scenes": [{"id": "gate", "name": "村口", "npcs": ["guard"], "exits": []}],
+    "npcs": [{"id": "guard", "name": "王守卫", "persona": "多疑的老兵",
+              "initial_attitude": 40}],
+    "clues": [{"id": "c1", "content": "壁炉灰里藏着一页烧焦的账册", "unlocks": []}],
+    "endings": [],
+}
+
+
+def test_prompt_includes_new_clue_content(campaign):
+    """新揭示线索的内容进叙事提示词：叙事需自然呈现发现；不泄漏内部 id。"""
+    client, built = make_client(["有效叙事。"])
+    module = Module.model_validate(NARRATE_CLUE_MODULE)
+    state = base_state(campaign, decision={"ending_reached": None, "checks": [],
+                                           "clues_revealed": ["c1"],
+                                           "proactive_npc_triggers": [],
+                                           "scene_transition": None, "memory_queries": []})
+    build_narrate_node(client, module)(state)
+    prompt = built["qwen3.8-flash"].calls[0][1].content
+    assert "烧焦的账册" in prompt
+    assert "c1" not in prompt   # 叙事层不出现内部 id
