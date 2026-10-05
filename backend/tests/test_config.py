@@ -4,7 +4,7 @@ from app.config import load_pricing, load_settings, resolve_resource_path
 def test_defaults_and_env_override(monkeypatch):
     monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
     s = load_settings()
-    assert s.gm_model == "qwen3.8-flash" and s.turn_window_seconds == 60
+    assert s.gm_model == "qwen3.8-flash"
     monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
     assert load_settings().deepseek_api_key == "sk-test"
 

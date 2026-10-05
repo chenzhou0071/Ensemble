@@ -25,7 +25,6 @@ from app.storage.repo import SqliteRepository
 from app.tasks import BackgroundQueue
 
 _SUCCESS_LEVELS = ("critical", "extreme", "hard", "regular")
-_TICK_SECONDS = 0.05
 
 
 def _dice_payload(row) -> dict:
@@ -57,14 +56,12 @@ class RoomSession:
     queue: BackgroundQueue
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     started: bool = False
-    driving: bool = False
     ended: bool = False
     prev_scene: str | None = None
     last_clue_id: int = 0
     last_scene_id: int = 0
     last_dice_id: int = 0
-    window_task: asyncio.Task | None = None
-    window_started: float = 0.0
+    drive_task: asyncio.Task | None = None
 
     @property
     def config(self) -> dict:
@@ -111,9 +108,7 @@ class SessionManager:
             campaign_id=campaign_id, repo=deps.repo, settings=deps.settings,
             module=module, graph=graph, queue=queue,
             bus=EventBus(replay_size=deps.settings.ws_replay_size),
-            buffer=TurnBuffer(window_seconds=deps.settings.turn_window_seconds,
-                              single_player_debounce_seconds=(
-                                  deps.settings.single_player_debounce_seconds)),
+            buffer=TurnBuffer(),
             branch_id=campaign.active_branch_id)
         self._sessions[campaign_id] = session
         return session
@@ -155,8 +150,8 @@ class SessionManager:
         async with self._lock:
             old = self._sessions.pop(campaign_id, None)
             if old is not None:
-                if old.window_task is not None and not old.window_task.done():
-                    old.window_task.cancel()
+                if old.drive_task is not None and not old.drive_task.done():
+                    old.drive_task.cancel()
                 old.queue.stop()          # 旧分支摘要队列：跑完在队任务后退出
             session = self._assemble(campaign_id)
             if old is not None:
@@ -173,9 +168,14 @@ class SessionManager:
         entry = {"player_id": player_id, "character_id": f"pc_{player_id}",
                  "text": text.strip(),
                  "submitted_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
-        status = session.buffer.submit(player_id, entry, now=time.time())
+        status = session.buffer.submit(player_id, entry)
         if status == "accepted":
             session.bus.push("actor", {"player_id": player_id, "text": entry["text"]})
+            # 单人即结算：提交即收口，后台驱动（不再等待窗口/防抖/超时）
+            payload = session.buffer.close()
+            session.drive_task = asyncio.create_task(
+                self._drive(session, Command(resume=payload,
+                                             update={"branch_id": session.branch_id})))
         elif status == "deferred":
             session.bus.push("notice",
                              {"kind": "submit", "status": "deferred",
@@ -185,8 +185,8 @@ class SessionManager:
 
     async def close(self) -> None:
         for session in list(self._sessions.values()):
-            if session.window_task is not None and not session.window_task.done():
-                session.window_task.cancel()
+            if session.drive_task is not None and not session.drive_task.done():
+                session.drive_task.cancel()
             session.queue.flush(2.0)      # 退出前尽力收尾摘要（丢任务无害：watermark 自愈）
             session.queue.stop()
         self._sessions.clear()
@@ -194,7 +194,6 @@ class SessionManager:
     # ---------- 驱动 ----------
 
     async def _drive(self, session: RoomSession, inp) -> None:
-        session.driving = True
         snap0 = session.graph.get_state(session.config)
         session.bus.push("turn", {"phase": "resolving",
                                   "turn_id": int((snap0.values or {}).get("turn_id", 0))})
@@ -217,10 +216,7 @@ class SessionManager:
                 loop.call_soon_threadsafe(
                     session.bus.push, "error", {"message": f"图执行失败：{exc}"})
 
-        try:
-            await asyncio.to_thread(_run)
-        finally:
-            session.driving = False
+        await asyncio.to_thread(_run)
         self._push_snapshot(session)
 
     def _push_dice(self, session: RoomSession, payload: dict) -> None:
@@ -298,25 +294,13 @@ class SessionManager:
         players = [p.id for p in session.repo.list_players(session.campaign_id)]
         snap = session.graph.get_state(session.config)
         turn_id = int((snap.values or {}).get("turn_id", 0))
-        session.window_started = time.time()
-        epoch = session.buffer.open(turn_id, players, now=session.window_started)
+        session.buffer.open(turn_id, players)
         session.bus.push("turn", {"phase": "collecting", "turn_id": turn_id})
-        if session.window_task is not None and not session.window_task.done():
-            session.window_task.cancel()
-        session.window_task = asyncio.create_task(self._window_timer(session, epoch))
-
-    async def _window_timer(self, session: RoomSession, epoch: int) -> None:
-        while True:
-            await asyncio.sleep(_TICK_SECONDS)
-            buf = session.buffer
-            if buf.epoch != epoch:      # 窗口已被替换或关闭：本定时器退出
-                return
-            if buf.should_close(time.time(), session.window_started):
-                payload = buf.close()
-                await self._drive(session,
-                                  Command(resume=payload,
-                                          update={"branch_id": session.branch_id}))
-                return
+        if session.buffer.submissions:      # 结算期间的顺延提交：立即驱动下一轮
+            payload = session.buffer.close()
+            session.drive_task = asyncio.create_task(
+                self._drive(session, Command(resume=payload,
+                                             update={"branch_id": session.branch_id})))
 
     # ---------- 快照 ----------
 

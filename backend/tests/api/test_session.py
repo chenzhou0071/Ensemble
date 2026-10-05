@@ -46,9 +46,7 @@ def room(tmp_path):
     settings = Settings(sqlite_path=str(tmp_path / "api.db"),
                         modules_dir=str(ROOT / "modules"),
                         pricing_path=str(ROOT / "config" / "pricing.yaml"),
-                        extractor_model="qwen-extract",   # 摘要隔离：后台线程不抢脚本
-                        single_player_debounce_seconds=0.1,
-                        turn_window_seconds=3.0)
+                        extractor_model="qwen-extract")   # 摘要隔离：后台线程不抢脚本
     campaign = repo.create_campaign("misty_hollow", "会话测试")
     player = repo.add_player(campaign.id, "张三")
     char = make_default_character(player.id, "张三")
@@ -122,21 +120,6 @@ async def test_state_payload_lists_only_acquainted_npcs(room):
     await manager.close()
 
 
-async def test_single_player_window_never_auto_closes_on_timeout(room):
-    """单人挂机不超时：窗口超时已过仍停留在 collecting，不产生空跑回合（用户需求 2026-10-03）。"""
-    repo, settings, campaign, player = room      # turn_window_seconds=3.0
-    factory = script_factory([OPENING_DECIDE, "雾气笼罩着广场。"])
-    manager = SessionManager(AppDeps(settings=settings, repo=repo, model_factory=factory))
-    session = await manager.ensure_started(campaign.id)
-    assert session.buffer.phase == "collecting"
-
-    await asyncio.sleep(3.5)                     # 已超过 3.0s 窗口
-    assert session.buffer.phase == "collecting"
-    snap = session.graph.get_state(session.config)
-    assert int((snap.values or {}).get("turn_id", 0)) == 1   # 未空跑推进
-    await manager.close()
-
-
 async def test_ensure_started_is_idempotent(room):
     repo, settings, campaign, player = room
     factory = script_factory([OPENING_DECIDE, "开场。"])
@@ -165,4 +148,68 @@ async def test_branch_switch_reassembles_and_reopens(room):
     assert new is not session and new.bus is old_bus
     assert new.branch_id == f"{campaign.id}@alt"
     assert new.buffer.phase == "collecting"      # 无 checkpoint 的分支自动全新开场
+    await manager.close()
+
+
+async def test_submit_settles_immediately(room):
+    """提交即结算：handle_submit 返回时本回合已收口（无防抖/定时器等待），
+    结算完成后自动开启下一轮输入窗口。"""
+    repo, settings, campaign, player = room
+    factory = script_factory([OPENING_DECIDE, "雾气笼罩着广场。",
+                              TURN_DECIDE, "你蹲下查看井边。"])
+    manager = SessionManager(AppDeps(settings=settings, repo=repo, model_factory=factory))
+    session = await manager.ensure_started(campaign.id)
+    assert session.buffer.phase == "collecting"
+
+    sub = session.bus.subscribe("__test__")      # 先订阅再提交：actor 广播不遗漏
+    try:
+        status = await manager.handle_submit(campaign.id, player.id, "我绕到喷泉后面")
+        assert status == "accepted"
+        assert session.buffer.phase == "idle"    # 已收口：无需等待任何窗口
+        events = await collect_until(sub, lambda evts: any(
+            e.type == "turn" and e.payload.get("phase") == "collecting"
+            and e.payload.get("turn_id") == 2 for e in evts))
+    finally:
+        session.bus.unsubscribe(sub)
+    assert any(e.type == "state" for e in events)
+    assert any(e.type == "actor" for e in events)
+    assert session.buffer.phase == "collecting"  # 结算完自动开下一窗口
+    await manager.close()
+
+
+async def test_submission_during_settlement_defers_to_next_turn(room):
+    """结算期间再次提交：顺延到下一轮并自动结算（不覆盖、不丢弃、不需重新输入）。"""
+    repo, settings, campaign, player = room
+    factory = script_factory([OPENING_DECIDE, "雾气笼罩着广场。",
+                              TURN_DECIDE, "你蹲下查看井边。",
+                              TURN_DECIDE, "你继续探查。"])
+    manager = SessionManager(AppDeps(settings=settings, repo=repo, model_factory=factory))
+    session = await manager.ensure_started(campaign.id)
+    assert session.buffer.phase == "collecting"
+
+    sub = session.bus.subscribe("__test__")
+    try:
+        assert await manager.handle_submit(campaign.id, player.id, "第一轮行动") == "accepted"
+        # 此刻驱动已派发（后台任务尚未跑完）：立即提交第二条 → 必须顺延而非覆盖
+        assert await manager.handle_submit(campaign.id, player.id, "抢跑") == "deferred"
+        events = await collect_until(sub, lambda evts: any(
+            e.type == "turn" and e.payload.get("phase") == "collecting"
+            and e.payload.get("turn_id") == 3 for e in evts))
+    finally:
+        session.bus.unsubscribe(sub)
+    assert session.buffer.phase == "collecting"
+    await manager.close()
+
+
+async def test_idle_room_never_drives_without_input(room):
+    """无提交则系统静止：没有超时空跑，回合不推进（防挂机烧钱）。"""
+    repo, settings, campaign, player = room
+    factory = script_factory([OPENING_DECIDE, "雾气笼罩着广场。"])
+    manager = SessionManager(AppDeps(settings=settings, repo=repo, model_factory=factory))
+    session = await manager.ensure_started(campaign.id)
+
+    await asyncio.sleep(0.3)
+    snap = session.graph.get_state(session.config)
+    assert int((snap.values or {}).get("turn_id", 0)) == 1
+    assert session.buffer.phase == "collecting"
     await manager.close()

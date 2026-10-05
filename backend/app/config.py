@@ -46,13 +46,11 @@ class Settings(BaseModel):
     qwen_api_key: str | None = None
     deepseek_api_key: str | None = None
     request_timeout_seconds: int = 60
-    turn_window_seconds: int = 60
     turn_token_cap: int = 30000
     campaign_cost_cap_usd: float = 10.0
     enable_thinking: bool = False   # qwen 系思考模式：要快+省，默认关（ENSEMBLE_ENABLE_THINKING=1 开启）
     modules_dir: str = "../modules"
     cors_origins: str = "http://localhost:5173"
-    single_player_debounce_seconds: float = 2.0
     ws_replay_size: int = 500
 
     @property

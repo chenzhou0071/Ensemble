@@ -15,6 +15,7 @@ from app.llm.fakes import FakeLLM
 from app.rules.character import make_default_character
 from app.storage.db import init_db, make_engine
 from app.storage.repo import SqliteRepository
+from ws_utils import ws_connect
 
 ROOT = Path(__file__).resolve().parents[3]
 
@@ -60,9 +61,7 @@ def build_env(tmp_path, script=None, campaign=None):
     settings = Settings(sqlite_path=str(tmp_path / "e2e.db"),
                         modules_dir=str(ROOT / "modules"),
                         pricing_path=str(ROOT / "config" / "pricing.yaml"),
-                        extractor_model="qwen-extract",  # 摘要隔离：后台线程不抢脚本
-                        single_player_debounce_seconds=0.1,
-                        turn_window_seconds=10.0)
+                        extractor_model="qwen-extract")  # 摘要隔离：后台线程不抢脚本
     if campaign is None:
         campaign = repo.create_campaign("misty_hollow", "端到端")
         player = repo.add_player(campaign.id, "张三")
@@ -103,7 +102,7 @@ def test_full_campaign_playthrough_to_ending(tmp_path):
     events: list[dict] = []
     with TestClient(app) as client:
         url = f"/ws/campaign/{campaign.id}?player_id={player.id}"
-        with client.websocket_connect(url) as ws:
+        with ws_connect(client, url) as ws:
             pump_until(ws, events, _collecting(1))          # 回合 0：开场驱动后开窗
             assert any(e["type"] == "token" for e in events)
             assert any(e["type"] == "scene" and e["payload"]["scene_id"] == "square"
@@ -134,14 +133,14 @@ def test_reconnect_replays_full_history_and_can_continue(tmp_path):
     app, repo, campaign, player, char = build_env(tmp_path)
     url = f"/ws/campaign/{campaign.id}?player_id={player.id}"
     with TestClient(app) as client:
-        with client.websocket_connect(url) as ws:           # 首次连接：走完回合 0/1
+        with ws_connect(client, url) as ws:           # 首次连接：走完回合 0/1
             events: list[dict] = []
             pump_until(ws, events, _collecting(1))
             ws.send_text(json.dumps({"type": "input", "text": "我凑近公告栏查看启事"}))
             pump_until(ws, events, _collecting(2))
 
         replayed: list[dict] = []                           # F5 刷新：resume_from=0 全量回放
-        with client.websocket_connect(url + "&resume_from=0") as ws2:
+        with ws_connect(client, url + "&resume_from=0") as ws2:
             pump_until(ws2, replayed, lambda evts: any(
                 e["type"] == "clue" and e["payload"]["clue_id"] == "clue_missing"
                 for e in evts))
@@ -169,7 +168,7 @@ def test_reenter_after_backend_restart_restores_state(tmp_path):
     app, repo, campaign, player, char = build_env(tmp_path)
     url = f"/ws/campaign/{campaign.id}?player_id={player.id}"
     with TestClient(app) as client:
-        with client.websocket_connect(url) as ws:
+        with ws_connect(client, url) as ws:
             events: list[dict] = []
             pump_until(ws, events, _collecting(1))
             ws.send_text(json.dumps({"type": "input", "text": "我凑近公告栏查看启事"}))
@@ -179,7 +178,7 @@ def test_reenter_after_backend_restart_restores_state(tmp_path):
     app2, *_ = build_env(tmp_path, campaign=campaign)
     with TestClient(app2) as client2:
         replayed: list[dict] = []
-        with client2.websocket_connect(url + "&resume_from=0") as ws2:
+        with ws_connect(client2, url + "&resume_from=0") as ws2:
             pump_until(ws2, replayed, _collecting(2))
 
     states = [e for e in replayed if e["type"] == "state"]
@@ -212,7 +211,7 @@ def test_scene_move_pushes_scene_event(tmp_path):
     events: list[dict] = []
     with TestClient(app) as client:
         url = f"/ws/campaign/{campaign.id}?player_id={player.id}"
-        with client.websocket_connect(url) as ws:
+        with ws_connect(client, url) as ws:
             pump_until(ws, events, _collecting(1))             # 回合 0：开场（广场首推）
             assert any(e["type"] == "scene" and e["payload"]["scene_id"] == "square"
                        for e in events)
@@ -233,7 +232,7 @@ def test_dice_event_precedes_narration_tokens(tmp_path):
     events: list[dict] = []
     with TestClient(app) as client:
         url = f"/ws/campaign/{campaign.id}?player_id={player.id}"
-        with client.websocket_connect(url) as ws:
+        with ws_connect(client, url) as ws:
             pump_until(ws, events, _collecting(1))
             ws.send_text(json.dumps({"type": "input", "text": "我凑近公告栏查看启事"}))
             pump_until(ws, events, _collecting(2))
@@ -264,7 +263,7 @@ def test_fallback_does_not_replay_previous_dice(tmp_path):
     events: list[dict] = []
     with TestClient(app) as client:
         url = f"/ws/campaign/{campaign.id}?player_id={player.id}"
-        with client.websocket_connect(url) as ws:
+        with ws_connect(client, url) as ws:
             pump_until(ws, events, _collecting(1))
             ws.send_text(json.dumps({"type": "input", "text": "查看公告栏"}))
             pump_until(ws, events, _collecting(2))             # 回合 1 成功（含检定）

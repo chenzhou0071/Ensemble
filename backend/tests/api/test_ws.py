@@ -12,6 +12,7 @@ from app.llm.fakes import FakeLLM
 from app.rules.character import make_default_character
 from app.storage.db import init_db, make_engine
 from app.storage.repo import SqliteRepository
+from ws_utils import ws_connect
 
 ROOT = Path(__file__).resolve().parents[3]
 
@@ -44,9 +45,7 @@ def app(tmp_path):
     settings = Settings(sqlite_path=str(tmp_path / "ws.db"),
                         modules_dir=str(ROOT / "modules"),
                         pricing_path=str(ROOT / "config" / "pricing.yaml"),
-                        extractor_model="qwen-extract",   # 摘要隔离：后台线程不抢脚本
-                        single_player_debounce_seconds=0.1,
-                        turn_window_seconds=3.0)
+                        extractor_model="qwen-extract")   # 摘要隔离：后台线程不抢脚本
     factory = script_factory([OPENING_DECIDE, "雾气笼罩着广场。",
                               TURN_DECIDE, "你蹲下查看井边。"])
     deps = AppDeps(settings=settings, repo=repo, model_factory=factory)
@@ -63,7 +62,7 @@ def test_ws_full_round_trip(app):
     seen = set()
     with TestClient(application) as client:
         url = f"/ws/campaign/{campaign.id}?player_id={player.id}"
-        with client.websocket_connect(url) as ws:
+        with ws_connect(client, url) as ws:
             turn_id = None
             while turn_id is None:                      # 收开场流直到窗口打开
                 evt = json.loads(ws.receive_text())
@@ -93,5 +92,5 @@ def test_ws_rejects_ghost_player(app):
     with TestClient(application) as client:
         url = f"/ws/campaign/{campaign.id}?player_id=ghost"
         with pytest.raises(WebSocketDisconnect):
-            with client.websocket_connect(url) as ws:
+            with ws_connect(client, url) as ws:
                 ws.receive_text()
