@@ -19,6 +19,7 @@ export default function Room({ session, onLeave }: {
 }) {
   const state = useGame();
   const [moduleInfo, setModuleInfo] = useState<ModuleDetail | null>(null);
+  const [panelOpen, setPanelOpen] = useState(false);
   const clientRef = useRef<WsClient | null>(null);
 
   useEffect(() => {
@@ -54,6 +55,8 @@ export default function Room({ session, onLeave }: {
         <span className="turn-badge">
           回合 {state.turnId} · ${state.costUsd.toFixed(3)}
         </span>
+        <button className="panel-toggle" aria-expanded={panelOpen}
+                onClick={() => setPanelOpen((open) => !open)}>手账</button>
       </header>
       {state.errorMessage && (
         <div className="error-banner">{state.errorMessage}</div>
@@ -62,7 +65,13 @@ export default function Room({ session, onLeave }: {
       <main className="room-main">
         <NarrationStream segments={state.segments} live={state.live}
                          npcNames={npcNames} />
-        <aside className="room-side">
+        {panelOpen && (
+          <div className="room-scrim" data-testid="room-scrim" aria-hidden="true"
+               onClick={() => setPanelOpen(false)} />
+        )}
+        <aside className={`room-side${panelOpen ? " open" : ""}`}>
+          <button className="side-close" aria-label="关闭手账"
+                  onClick={() => setPanelOpen(false)}>✕</button>
           <CharacterPanel characters={state.characters as never[]} />
           {state.scene && (
             <section className="panel">

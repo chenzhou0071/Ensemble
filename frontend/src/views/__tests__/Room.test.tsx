@@ -1,4 +1,4 @@
-import { act, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import Room from "../Room";
@@ -76,5 +76,27 @@ describe("Room", () => {
     });
     expect(screen.queryByText("故事已抵达结局")).not.toBeInTheDocument();
     expect(screen.getByPlaceholderText("故事已结束")).toBeDisabled();
+  });
+
+  it("opens the mobile drawer via 手账 button and closes it with ✕", () => {
+    render(<Room session={SESSION} onLeave={() => {}} />);
+    const side = screen.getByRole("complementary");
+    expect(side.classList.contains("open")).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: "手账" }));
+    expect(side.classList.contains("open")).toBe(true);
+
+    fireEvent.click(screen.getByRole("button", { name: "关闭手账" }));
+    expect(side.classList.contains("open")).toBe(false);
+  });
+
+  it("closes the mobile drawer when tapping the scrim", () => {
+    render(<Room session={SESSION} onLeave={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: "手账" }));
+    expect(screen.getByTestId("room-scrim")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId("room-scrim"));
+    expect(screen.getByRole("complementary").classList.contains("open")).toBe(false);
+    expect(screen.queryByTestId("room-scrim")).not.toBeInTheDocument();
   });
 });

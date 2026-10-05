@@ -240,6 +240,9 @@ input:focus, select:focus {
 .scene-name { font-weight: 700; letter-spacing: 0.04em; }
 .char-name .hp { color: var(--ok); font-weight: 400; margin-left: 8px; font-size: 13px; }
 
+/* ---- 手机抽屉开关：桌面隐藏，见文件末尾媒体查询 ---- */
+.panel-toggle, .side-close, .room-scrim { display: none; }
+
 /* ---- 骰子：画框卡片 ---- */
 .dice-overlay {
   position: fixed;
@@ -270,4 +273,55 @@ input:focus, select:focus {
 @keyframes card-in {
   from { transform: scale(0.92); opacity: 0.4; }
   to { transform: scale(1); opacity: 1; }
+}
+
+/* ---- 手机适配（≤768px）：叙事优先，右栏收进抽屉 ---- */
+@media (max-width: 768px) {
+  .room-header { padding: 8px 12px; gap: 8px; }
+  .room-header h2 {
+    font-size: 16px;
+    flex: 1;
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .conn-badge { display: none; }
+  .turn-badge { font-size: 11px; }
+
+  .panel-toggle { display: inline-block; padding: 6px 12px; font-size: 13px; }
+
+  .room-story { padding: 18px 14px 36px; font-size: 15px; }
+  .room-footer { padding: 10px 12px; }
+
+  .room-side {
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: min(86vw, 340px);
+    z-index: 40;
+    transform: translateX(105%);
+    transition: transform 0.22s ease;
+    background: linear-gradient(180deg, #e9dec5, #e2d5b7);
+    box-shadow: -12px 0 32px rgba(58, 46, 33, 0.35);
+  }
+  .room-side.open { transform: translateX(0); }
+
+  .side-close {
+    display: inline-block;
+    position: absolute;
+    top: 10px;
+    right: 12px;
+    padding: 4px 10px;
+    font-size: 13px;
+  }
+
+  .room-scrim {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 39;
+    background: rgba(58, 46, 33, 0.45);
+  }
 }
