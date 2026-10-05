@@ -184,3 +184,14 @@ def test_prompt_includes_new_clue_content(campaign):
     prompt = built["qwen3.8-flash"].calls[0][1].content
     assert "烧焦的账册" in prompt
     assert "c1" not in prompt   # 叙事层不出现内部 id
+
+
+def test_prompt_marks_secret_check(campaign, mini_module):
+    """暗骰标注进叙事提示词：不得直接暴露其检定与结果。"""
+    client, built = make_client(["有效叙事。"])
+    state = base_state(campaign, check_results=[{
+        "actor": "pc_1", "skill": "聆听", "roll": 30, "skill_value": 50,
+        "level": "regular", "success": True, "seed": 2, "secret": True}])
+    build_narrate_node(client, mini_module)(state)
+    prompt = built["qwen3.8-flash"].calls[0][1].content
+    assert "暗骰" in prompt and "不得在叙事中直接暴露" in prompt

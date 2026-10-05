@@ -8,6 +8,7 @@ class CheckRequest(BaseModel):
     actor: str
     skill: str
     difficulty: CheckDifficulty = CheckDifficulty.REGULAR
+    secret: bool = False          # true=暗骰：玩家角色无从察觉，叙事不得直接暴露
 
 
 class NpcTrigger(BaseModel):

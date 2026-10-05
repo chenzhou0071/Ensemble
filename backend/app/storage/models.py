@@ -65,6 +65,7 @@ class DiceRecordRow(SQLModel, table=True):
     roll: int
     level: str
     seed: int
+    secret: bool = False          # 暗骰：L2 保留，但不对玩家可见
     created_at: datetime = Field(default_factory=_now)
 
 

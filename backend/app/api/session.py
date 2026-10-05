@@ -238,7 +238,8 @@ class SessionManager:
             if row.id is None or row.id <= session.last_dice_id:
                 continue   # 已实时推送：不重复（含失败不推进回合的重放防护）
             session.last_dice_id = row.id
-            session.bus.push("dice", _dice_payload(row))
+            session.bus.push("dice", _dice_payload(row),
+                             visibility="gm" if row.secret else "all")
         for event in session.repo.list_events(session.campaign_id, session.branch_id,
                                               types=["clue"]):
             if event.id is not None and event.id > session.last_clue_id:
@@ -337,7 +338,9 @@ class SessionManager:
     def resync_payload(self, session: RoomSession) -> dict:
         """重连 gap 时的全量对齐：状态快照（含权威叙事分段）+ 最近骰子 + 当前相位。"""
         payload = self._state_payload(session)
-        rows = session.repo.list_dice_records(session.campaign_id, session.branch_id)
+        rows = [r for r in session.repo.list_dice_records(session.campaign_id,
+                                                          session.branch_id)
+                if not r.secret]
         phase = ("ended" if session.ended else
                  "collecting" if session.buffer.phase == "collecting" else "resolving")
         payload.update({"dice": [_dice_payload(r) for r in rows[-12:]],

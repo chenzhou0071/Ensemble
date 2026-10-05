@@ -197,11 +197,12 @@ class SqliteRepository:
 
     def add_dice_record(self, campaign_id: str, branch_id: str, turn_id: int, actor: str,
                         skill: str, skill_value: int, difficulty: str, roll: int,
-                        level: str, seed: int) -> int:
+                        level: str, seed: int, secret: bool = False) -> int:
         with Session(self.engine) as s:
             row = DiceRecordRow(campaign_id=campaign_id, branch_id=branch_id, turn_id=turn_id,
                                 actor=actor, skill=skill, skill_value=skill_value,
-                                difficulty=difficulty, roll=roll, level=level, seed=seed)
+                                difficulty=difficulty, roll=roll, level=level, seed=seed,
+                                secret=secret)
             s.add(row)
             s.flush()
             rid = int(row.id)

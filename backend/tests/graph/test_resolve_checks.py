@@ -55,3 +55,24 @@ def test_ending_kept_when_checks_succeed(node, campaign):
     assert upd["check_results"][0]["success"] is True
     decision = upd.get("decision", state["decision"])   # 未改写即沿用原裁决
     assert decision["ending_reached"] == "ed"
+
+
+def test_secret_check_marks_record_and_event(node, repo, campaign):
+    """暗骰：落库 secret=True、check 事件 visibility="gm"、结果带 secret 标。"""
+    upd = node(base_state(campaign, decision={"checks": [
+        {"actor": "pc_1", "skill": "侦查", "difficulty": "regular", "secret": True}]}))
+    assert upd["check_results"][0]["secret"] is True
+    rows = repo.list_dice_records(campaign.id, campaign.active_branch_id, turn_id=1)
+    assert len(rows) == 1 and rows[0].secret is True
+    events = repo.list_events(campaign.id, campaign.active_branch_id, types=["check"])
+    assert events[0].visibility == "gm"
+
+
+def test_regular_check_defaults_to_visible(node, repo, campaign):
+    """未标暗骰：行为与现状完全一致（secret=False、事件 all）。"""
+    node(base_state(campaign, decision={"checks": [
+        {"actor": "pc_1", "skill": "侦查", "difficulty": "regular"}]}))
+    rows = repo.list_dice_records(campaign.id, campaign.active_branch_id, turn_id=1)
+    assert rows[0].secret is False
+    events = repo.list_events(campaign.id, campaign.active_branch_id, types=["check"])
+    assert events[0].visibility == "all"

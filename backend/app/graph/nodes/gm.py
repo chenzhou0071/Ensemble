@@ -12,7 +12,7 @@ DECIDE_SYSTEM = (
     "你是跑团主持人（COC 风格）。基于玩家行动与当前场景做结构化裁决，"
     "只输出一个 JSON 对象（不要 markdown 代码块、不要任何解释文字），字段：\n"
     'intent_summary(str，一句话概括玩家意图)、'
-    'checks(数组，元素 {"actor","skill","difficulty"(regular|hard|extreme)})、'
+    'checks(数组，元素 {"actor","skill","difficulty"(regular|hard|extreme),"secret"(bool，可选，默认 false)})、'
     'proactive_npc_triggers(数组，元素 {"npc_id","trigger"})、'
     'scene_transition(null 或 {"to_scene","reason"})、'
     'clues_revealed(数组，元素为线索 id，仅当本回合玩家明确获得线索时填写)、'
@@ -27,7 +27,8 @@ DECIDE_SYSTEM = (
     "5. scene_transition 仅当玩家成功移向相邻场景时给出，to_scene 必须从「可去场景」中选，否则填 null\n"
     "6. memory_queries 为 0~3 个简短检索词，仅在需要回忆前情时给出\n"
     "7. 开场回合可以引入场面与 NPC，但不要要求检定；\n"
-    "8. 玩家与 NPC 的社交行动即使检定失败，也要让该 NPC 在场回应（冷淡、回避、暗示皆可），不得让场面停滞或写成拒绝交流。"
+    "8. 玩家与 NPC 的社交行动即使检定失败，也要让该 NPC 在场回应（冷淡、回避、暗示皆可），不得让场面停滞或写成拒绝交流。\n"
+    "9. secret=true 表示玩家角色无从察觉的暗骰（如暗中进行的观察或聆听）；其检定与结果不得在叙事中直接暴露。"
 )
 
 
@@ -196,8 +197,10 @@ def _check_lines(state: GameState) -> str:
     lines = []
     for c in state.get("check_results", []):
         verdict = "成功" if c.get("success") else "失败"
+        note = ("（暗骰：不得在叙事中直接暴露该检定与结果，只可化为隐约的线索或不安感）"
+                if c.get("secret") else "")
         lines.append(f"- {_char_name(state, c.get('actor'))}的「{c['skill']}」："
-                     f"{c['roll']}/{c['skill_value']} → {c['level']}（{verdict}）")
+                     f"{c['roll']}/{c['skill_value']} → {c['level']}（{verdict}）{note}")
     return "\n".join(lines) or "（本回合无检定）"
 
 

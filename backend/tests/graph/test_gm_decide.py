@@ -149,3 +149,8 @@ def test_decide_prompt_separates_revealed_clues(repo, campaign):
     known, _, pending = prompt.partition("本场景可发现的线索")
     assert "玩家已掌握的线索" in known and "烧焦的账册" in known
     assert "烧焦的账册" not in pending and "旧铜扣" in pending
+
+
+def test_decide_system_documents_secret_dice():
+    """暗骰契约：checks 元素可带 secret；其检定与结果不得在叙事中直接暴露。"""
+    assert "secret" in DECIDE_SYSTEM and "暗骰" in DECIDE_SYSTEM

@@ -75,27 +75,32 @@ def build_resolve_checks_node(repo):
         results = []
         for chk in checks:
             actor, skill = chk["actor"], chk["skill"]
+            secret = bool(chk.get("secret"))
             skill_value = _skill_value(state, actor, skill)
             seed = new_seed()
             r = roll_check(actor, skill, skill_value,
                            CheckDifficulty(chk.get("difficulty", "regular")), seed)
             rid = repo.add_dice_record(campaign_id, branch_id, turn_id, r.actor, r.skill,
                                        r.skill_value, str(r.difficulty), r.roll, str(r.level),
-                                       r.seed)
-            # 骰子先出：掷骰后立即经流式通道推送（先于叙事 token；收口快照按 id 去重兜底）
-            writer({"dice": {"id": rid, "actor": r.actor, "skill": r.skill,
-                             "skill_value": r.skill_value, "difficulty": str(r.difficulty),
-                             "roll": r.roll, "level": str(r.level),
-                             "success": r.success, "seed": r.seed}})
+                                       r.seed, secret=secret)
+            # 骰子先出：明骰掷后立即经流式通道推送（先于叙事 token；收口快照按 id 去重兜底）；
+            # 暗骰不进实时流——流式通道无法按订阅者过滤，其可见性由收口快照统一兜底
+            if not secret:
+                writer({"dice": {"id": rid, "actor": r.actor, "skill": r.skill,
+                                 "skill_value": r.skill_value, "difficulty": str(r.difficulty),
+                                 "roll": r.roll, "level": str(r.level),
+                                 "success": r.success, "seed": r.seed}})
             verdict = "成功" if r.success else "失败"
             repo.add_event(campaign_id, branch_id, turn_id, type="check",
                            payload={"text": f"{actor} 的「{skill}」检定：{r.roll}/{r.skill_value} "
                                             f"→ {r.level}（{verdict}）",
-                                    "roll": r.roll, "level": str(r.level), "success": r.success})
+                                    "roll": r.roll, "level": str(r.level), "success": r.success,
+                                    "secret": secret},
+                           visibility="gm" if secret else "all")
             results.append({"actor": r.actor, "skill": r.skill, "roll": r.roll,
                             "skill_value": r.skill_value, "level": str(r.level),
                             "success": r.success, "seed": r.seed,
-                            "difficulty": str(r.difficulty)})
+                            "difficulty": str(r.difficulty), "secret": secret})
         upd: dict = {"check_results": results}
         # 结局动作的检定失败 → 本回合不收束（decide 判定时尚未掷骰，此处按结果纠正，
         # 防"检定失败但结局盲发"；叙事与路由随之按未收束走）
