@@ -1,4 +1,8 @@
+import sys
 from pathlib import Path
+
+# 确保 `import ws_utils` 稳定可用（不依赖 pytest 的 prepend 行为）
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import pytest
 from fastapi.testclient import TestClient
