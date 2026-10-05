@@ -12,14 +12,17 @@ export default function DiceOverlay({ dice, onDone }: {
   onDone: () => void;
 }) {
   const [display, setDisplay] = useState(0);
+  const [revealed, setRevealed] = useState(false);
 
   useEffect(() => {
     if (!dice) return;
     setDisplay(0);
+    setRevealed(false);                        // 跳动期间不揭晓结果
     const started = Date.now();
     const timer = setInterval(() => {
       if (Date.now() - started >= 1200) {
         setDisplay(dice.roll);
+        setRevealed(true);                     // 定格：揭晓等级与结果色
         clearInterval(timer);
         setTimeout(onDone, 600);
       } else {
@@ -30,14 +33,15 @@ export default function DiceOverlay({ dice, onDone }: {
   }, [dice, onDone]);
 
   if (!dice) return null;
+  const rollClass = revealed ? `dice-roll ${dice.success ? "ok" : "bad"}` : "dice-roll";
   return (
     <div className="dice-overlay">
       <div className="dice-card">
         <div className="dice-who">
           {dice.actor} · {dice.skill}（{dice.skill_value}）
         </div>
-        <div className={`dice-roll ${dice.success ? "ok" : "bad"}`}>{display}</div>
-        <div className="dice-level">{LEVEL_LABEL[dice.level] ?? dice.level}</div>
+        <div className={rollClass}>{display}</div>
+        <div className="dice-level">{revealed ? LEVEL_LABEL[dice.level] ?? dice.level : "……"}</div>
       </div>
     </div>
   );

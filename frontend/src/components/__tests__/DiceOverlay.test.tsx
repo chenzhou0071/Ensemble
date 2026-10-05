@@ -26,4 +26,22 @@ describe("DiceOverlay", () => {
     act(() => { vi.advanceTimersByTime(700); });
     expect(onDone).toHaveBeenCalled();
   });
+
+  it("hides verdict and result color while scrambling", () => {
+    vi.useFakeTimers();
+    render(<DiceOverlay dice={DICE} onDone={() => {}} />);
+    act(() => { vi.advanceTimersByTime(300); });
+    expect(screen.queryByText("困难成功")).not.toBeInTheDocument();  // 跳动中不揭晓等级
+    expect(screen.getByText("……")).toBeInTheDocument();              // 占位符
+    expect(document.querySelector(".dice-roll")?.className).not.toMatch(/ok|bad/);
+  });
+
+  it("reveals verdict and result color once the roll settles", () => {
+    vi.useFakeTimers();
+    render(<DiceOverlay dice={DICE} onDone={() => {}} />);
+    act(() => { vi.advanceTimersByTime(1300); });
+    expect(screen.getByText("困难成功")).toBeInTheDocument();
+    expect(screen.getByText("12")).toBeInTheDocument();
+    expect(document.querySelector(".dice-roll")?.className).toMatch(/\bok\b/);
+  });
 });
