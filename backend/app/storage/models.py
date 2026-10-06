@@ -13,6 +13,7 @@ class Campaign(SQLModel, table=True):
     module_id: str
     title: str
     active_branch_id: str
+    owner_client_id: str = Field(default="", index=True)   # 归属浏览器标识；空=升级前历史档
     created_at: datetime = Field(default_factory=_now)
 
 

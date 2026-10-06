@@ -15,6 +15,7 @@ export class WsClient {
   constructor(
     private campaignId: string,
     private playerId: string,
+    private clientId: string,
     private handlers: WsHandlers,
   ) {}
 
@@ -26,7 +27,8 @@ export class WsClient {
   private open(): void {
     const proto = location.protocol === "https:" ? "wss" : "ws";
     const url = `${proto}://${location.host}/ws/campaign/${this.campaignId}` +
-      `?player_id=${this.playerId}&resume_from=${this.lastSeq}`;
+      `?player_id=${this.playerId}&resume_from=${this.lastSeq}` +
+      `&client_id=${encodeURIComponent(this.clientId)}`;
     this.handlers.onStatus("connecting");
     const ws = new WebSocket(url);
     this.ws = ws;

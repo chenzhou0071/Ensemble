@@ -15,6 +15,7 @@ class CreateCampaignRequest(BaseModel):
     module_id: str
     title: str
     player_name: str = "调查员"
+    client_id: str = ""                # 归属浏览器标识（M4 单人版）
 
 
 @router.get("/modules")
@@ -34,7 +35,8 @@ def create_campaign(req: CreateCampaignRequest, request: Request):
         module = load_module(find_module_path(deps.settings.modules_dir, req.module_id))
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
-    campaign = deps.repo.create_campaign(module.meta.id, req.title)
+    campaign = deps.repo.create_campaign(module.meta.id, req.title,
+                                         owner_client_id=req.client_id)
     player = deps.repo.add_player(campaign.id, req.player_name)
     char = make_default_character(player.id, req.player_name)
     deps.repo.append_character(campaign.id, campaign.active_branch_id, 0,
@@ -44,12 +46,18 @@ def create_campaign(req: CreateCampaignRequest, request: Request):
 
 
 @router.get("/campaigns")
-def list_campaigns(request: Request):
+def list_campaigns(request: Request, client_id: str = ""):
+    """单人归属：只返回本 client 创建的档；无主历史档兼容可见。
+
+    缺省 client_id 时仅返回无主档——owner 档不泄露给未标识客户端。"""
     repo = _deps(request).repo
     from app.storage.models import Campaign
-    from sqlmodel import Session, select
+    from sqlmodel import Session, select, or_
     with Session(repo.engine) as s:
-        rows = s.exec(select(Campaign).order_by(Campaign.created_at.desc())).all()
+        rows = s.exec(select(Campaign)
+                      .where(or_(Campaign.owner_client_id == client_id,
+                                 Campaign.owner_client_id == ""))
+                      .order_by(Campaign.created_at.desc())).all()
     out = []
     for c in rows:
         out.append({"id": c.id, "title": c.title, "module_id": c.module_id,
@@ -59,13 +67,15 @@ def list_campaigns(request: Request):
 
 
 @router.get("/campaigns/{campaign_id}")
-def get_campaign(campaign_id: str, request: Request):
+def get_campaign(campaign_id: str, request: Request, client_id: str = ""):
     import json
     deps = _deps(request)
     repo = deps.repo
     try:
         campaign = repo.get_campaign(campaign_id)
     except KeyError:
+        raise HTTPException(status_code=404, detail="campaign not found")
+    if campaign.owner_client_id not in ("", client_id):
         raise HTTPException(status_code=404, detail="campaign not found")
     from app.content.loader import load_module
     from app.content.registry import find_module_path

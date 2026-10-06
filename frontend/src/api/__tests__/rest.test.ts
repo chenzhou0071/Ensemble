@@ -20,13 +20,21 @@ describe("rest", () => {
       ok: true, json: async () => ({ campaign_id: "c1" }),
     });
     vi.stubGlobal("fetch", fetchMock);
-    await api.createCampaign("misty_hollow", "初探", "张三");
+    await api.createCampaign("misty_hollow", "初探", "张三", "client-1");
     const init = fetchMock.mock.calls[0][1] as RequestInit;
     expect(fetchMock.mock.calls[0][0]).toBe("/api/campaigns");
     expect(init.method).toBe("POST");
     expect(JSON.parse(init.body as string)).toEqual({
       module_id: "misty_hollow", title: "初探", player_name: "张三",
+      client_id: "client-1",
     });
+  });
+
+  it("GETs campaign list scoped by client_id", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => [] });
+    vi.stubGlobal("fetch", fetchMock);
+    await api.campaigns("client-1");
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/campaigns?client_id=client-1");
   });
 
   it("throws on non-ok response", async () => {

@@ -36,7 +36,7 @@ afterEach(() => {
 
 function makeClient() {
   const events: unknown[] = [];
-  const client = new WsClient("c1", "p1", {
+  const client = new WsClient("c1", "p1", "client-1", {
     onEvent: (e) => events.push(e),
     onStatus: () => {},
   });
@@ -48,7 +48,7 @@ describe("WsClient", () => {
   it("connects with resume_from and forwards seq tracked events", () => {
     const { client, events } = makeClient();
     const ws = FakeWS.instances[0];
-    expect(ws.url).toContain("/ws/campaign/c1?player_id=p1&resume_from=0");
+    expect(ws.url).toContain("/ws/campaign/c1?player_id=p1&resume_from=0&client_id=client-1");
     ws.readyState = 1;
     ws.onmessage!({
       data: JSON.stringify({ seq: 5, type: "token", visibility: "all",

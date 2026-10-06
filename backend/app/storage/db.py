@@ -30,6 +30,8 @@ def migrate_schema(engine: Engine) -> None:
     with engine.begin() as conn:
         _ensure_column(conn, "dicerecordrow", "secret",
                        "secret BOOLEAN NOT NULL DEFAULT 0")
+        _ensure_column(conn, "campaign", "owner_client_id",
+                       "owner_client_id VARCHAR NOT NULL DEFAULT ''")
 
 
 def init_db(engine: Engine) -> None:

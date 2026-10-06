@@ -8,7 +8,8 @@ const handlers: { onEvent?: (e: unknown) => void; onStatus?: (s: string) => void
 const clientMock = { connect: vi.fn(), close: vi.fn(), sendInput: vi.fn() };
 
 vi.mock("../../api/ws", () => ({
-  WsClient: vi.fn().mockImplementation((_c: string, _p: string, h: typeof handlers) => {
+  WsClient: vi.fn().mockImplementation((_c: string, _p: string, _cid: string,
+                                         h: typeof handlers) => {
     handlers.onEvent = h.onEvent as never;
     handlers.onStatus = h.onStatus as never;
     return clientMock;

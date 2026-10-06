@@ -15,10 +15,19 @@ def _deps(websocket: WebSocket):
 
 @router.websocket("/ws/campaign/{campaign_id}")
 async def ws_campaign(websocket: WebSocket, campaign_id: str,
-                      player_id: str = Query(...), resume_from: int = Query(0)):
+                      player_id: str = Query(...), resume_from: int = Query(0),
+                      client_id: str = Query("")):
     deps = _deps(websocket)
     if deps.manager is None:
         await websocket.close(code=4403)
+        return
+    try:
+        campaign = deps.repo.get_campaign(campaign_id)
+    except KeyError:
+        await websocket.close(code=4404)
+        return
+    if campaign.owner_client_id not in ("", client_id):
+        await websocket.close(code=4404)
         return
     player = deps.repo.get_player(player_id)
     if player is None or player.campaign_id != campaign_id:

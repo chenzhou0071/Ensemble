@@ -15,11 +15,12 @@ class SqliteRepository:
 
     # ---------- campaigns & branches ----------
 
-    def create_campaign(self, module_id: str, title: str) -> Campaign:
+    def create_campaign(self, module_id: str, title: str,
+                        owner_client_id: str = "") -> Campaign:
         campaign_id = uuid.uuid4().hex[:12]
         branch = Branch(id=f"{campaign_id}@main", campaign_id=campaign_id, name="main")
         campaign = Campaign(id=campaign_id, module_id=module_id, title=title,
-                            active_branch_id=branch.id)
+                            active_branch_id=branch.id, owner_client_id=owner_client_id)
         with Session(self.engine) as s:
             s.add(branch)
             s.add(campaign)

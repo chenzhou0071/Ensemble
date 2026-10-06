@@ -13,6 +13,7 @@ vi.mock("../../api/rest", () => ({
     campaign: vi.fn(),
   },
 }));
+vi.mock("../../client", () => ({ getClientId: () => "test-client" }));
 
 const mocked = vi.mocked(api);
 
@@ -39,6 +40,9 @@ describe("Lobby", () => {
         campaignId: "c1", playerId: "p1", title: "迷雾山谷",
       }),
     );
+    expect(mocked.campaigns).toHaveBeenCalledWith("test-client");
+    expect(mocked.createCampaign).toHaveBeenCalledWith(
+      "misty_hollow", "迷雾山谷", "调查员", "test-client");
   });
 
   it("continues an existing campaign using its first player", async () => {
@@ -60,5 +64,6 @@ describe("Lobby", () => {
         campaignId: "c9", playerId: "p9", title: "旧档",
       }),
     );
+    expect(mocked.campaign).toHaveBeenCalledWith("c9", "test-client");
   });
 });

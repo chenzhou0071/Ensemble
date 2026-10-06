@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import { api } from "../api/rest";
+import { getClientId } from "../client";
 import type { Session } from "../session";
 import type { CampaignInfo, ModuleInfo } from "../types";
 
@@ -20,7 +21,7 @@ export default function Lobby({ onEnter }: { onEnter: (s: Session) => void }) {
         setModuleId(ms[0]?.id ?? "");
       })
       .catch((e) => setError(String(e)));
-    api.campaigns().then(setCampaigns).catch(() => {});
+    api.campaigns(getClientId()).then(setCampaigns).catch(() => {});
   }, []);
 
   async function create() {
@@ -28,7 +29,7 @@ export default function Lobby({ onEnter }: { onEnter: (s: Session) => void }) {
     setBusy(true);
     setError(null);
     try {
-      const r = await api.createCampaign(moduleId, title, playerName);
+      const r = await api.createCampaign(moduleId, title, playerName, getClientId());
       onEnter({ campaignId: r.campaign_id, playerId: r.player_id, title });
     } catch (e) {
       setError(String(e));
@@ -42,8 +43,8 @@ export default function Lobby({ onEnter }: { onEnter: (s: Session) => void }) {
     setBusy(true);
     setError(null);
     try {
-      const detail = await api.campaign(c.id);
-      const player = detail.players[0]; // M3 单人；M4 改为邀请码/选择玩家
+      const detail = await api.campaign(c.id, getClientId());
+      const player = detail.players[0];       // 单人档：唯一玩家即本档玩家
       if (!player) throw new Error("战役没有玩家记录");
       onEnter({ campaignId: c.id, playerId: player.id, title: c.title });
     } catch (e) {

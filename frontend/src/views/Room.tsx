@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { api } from "../api/rest";
 import { WsClient } from "../api/ws";
+import { getClientId } from "../client";
 import CharacterPanel from "../components/CharacterPanel";
 import CluePanel from "../components/CluePanel";
 import DiceLogPanel from "../components/DiceLogPanel";
@@ -24,7 +25,7 @@ export default function Room({ session, onLeave }: {
 
   useEffect(() => {
     useGame.getState().reset();
-    const client = new WsClient(session.campaignId, session.playerId, {
+    const client = new WsClient(session.campaignId, session.playerId, getClientId(), {
       onEvent: (evt) => useGame.getState().apply(evt),
       onStatus: (s) => useGame.getState().setConnected(s === "open"),
     });
