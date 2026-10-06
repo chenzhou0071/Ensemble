@@ -710,15 +710,17 @@ observability = ["langsmith>=0.1.100"]
 from app.obs.tracer import Tracer
 ```
 
-`LLMClient.__init__` 整体替换为（新增 `tracer` 参数与两个私有 helper）：
+`LLMClient.__init__` 替换为（在现状基础上新增 `tracer` 参数与两个私有 helper；**保留既有 `budget_probe` 参数与 `self._budget_probe`（检查点②，M2/M4-4 既有）**；默认工厂用 `_make_cached_factory(settings)`——旧稿的 `_default_factory` 不存在，勿用）：
 ```python
     def __init__(self, settings: Settings, pricing: Pricing,
                  usage_sink: UsageSink | None = None, model_factory: ModelFactory | None = None,
+                 budget_probe: Callable[[LlmContext], str] | None = None,
                  tracer: Tracer | None = None):
         self._settings = settings
         self._pricing = pricing
         self._usage_sink = usage_sink
-        self._factory: ModelFactory = model_factory or _default_factory
+        self._factory: ModelFactory = model_factory or _make_cached_factory(settings)
+        self._budget_probe = budget_probe
         self._tracer = tracer
 
     def _start_llm_run(self, role: Role, messages: list[ChatMessage], model: str,
@@ -738,10 +740,17 @@ from app.obs.tracer import Tracer
             self._tracer.finish_run(run_id, outputs=outputs, error=error)
 ```
 
-`chat` 方法整体替换为：
+`chat` 方法替换为（tracer 包裹；**开头的检查点②探针块为 M2/M4-4 既有逻辑，必须保留**——删掉会失去 exceed 降档与 paused 熔断）：
 ```python
     def chat(self, role: Role, messages: list[ChatMessage], ctx: LlmContext,
              cheap: bool = False) -> str:
+        # 检查点②（规格 §9）：每次调用前读实时累计——exceeded 自动降档，paused 拒绝调用
+        if not cheap and self._budget_probe is not None:
+            level = str(self._budget_probe(ctx))
+            if level == BudgetLevel.PAUSED:
+                raise BudgetPausedError("campaign cost cap reached")
+            if level == BudgetLevel.EXCEEDED:
+                cheap = True
         model, base_url, api_key = self._resolve(role, cheap)
         model_obj = self._factory(model, base_url, api_key)
         run_id = self._start_llm_run(role, messages, model, cheap)
@@ -765,11 +774,20 @@ from app.obs.tracer import Tracer
         return resp.text
 ```
 
-`chat_stream` 方法整体替换为：
+`chat_stream` 方法替换为（tracer 包裹；**检查点②探针块保留**；token 估算保持现状**两个独立 if**——模型侧缺哪个补哪个，勿合并为 `and`）：
 ```python
     def chat_stream(self, role: Role, messages: list[ChatMessage], ctx: LlmContext,
                     cheap: bool = False) -> Iterator[str]:
-        """流式输出；流正常结束后记一次账（消费方中途放弃则不记账、不落 trace）。"""
+        """流式输出；流正常结束后记一次账（消费方中途放弃则不记账、不落 trace）。
+
+        与 chat 同规则：调用前经检查点②探针（exceeded 自动降档、paused 拒绝）。
+        """
+        if not cheap and self._budget_probe is not None:
+            level = str(self._budget_probe(ctx))
+            if level == BudgetLevel.PAUSED:
+                raise BudgetPausedError("campaign cost cap reached")
+            if level == BudgetLevel.EXCEEDED:
+                cheap = True
         model, base_url, api_key = self._resolve(role, cheap)
         model_obj = self._factory(model, base_url, api_key)
         usage = StreamUsage()
@@ -786,8 +804,9 @@ from app.obs.tracer import Tracer
             self._finish_llm_run(run_id, error=str(exc))
             raise
         latency_ms = int((time.perf_counter() - start) * 1000)
-        if usage.tokens_in == 0 and usage.tokens_out == 0:
+        if usage.tokens_in == 0:
             usage.tokens_in = max(1, sum(len(m.content) for m in messages) // 2)
+        if usage.tokens_out == 0:
             usage.tokens_out = max(1, chars // 2)
         cost = compute_cost(self._pricing, model, usage.tokens_in, usage.tokens_out)
         if self._usage_sink is not None:
@@ -813,11 +832,12 @@ from app.obs.tracer import Tracer, make_tracer
     tracer: Tracer | None = None
 ```
 
-`SessionManager._assemble` 中 client 构造替换为（新增 `tracer` 行）：
+`SessionManager._assemble` 中 client 构造替换为（新增 `tracer` 行；**保留既有 `budget_probe` 行——检查点②，删除会静默失去熔断降档**）：
 ```python
         tracer = make_tracer(deps.settings)
         client = LLMClient(deps.settings, load_pricing(deps.settings.pricing_path),
                            usage_sink=deps.repo, model_factory=deps.model_factory,
+                           budget_probe=make_repo_budget_probe(deps.repo, guard),
                            tracer=tracer)
 ```
 
@@ -882,9 +902,11 @@ import 追加（`from app.memory.graphiti import build_memory` 之后）：
 ```python
 from app.obs.tracer import make_tracer
 ```
-`assemble()` 内 client 构造一行替换：
+`assemble()` 内 client 构造替换（**保留既有 `budget_probe`**）：
 ```python
-    client = LLMClient(settings, pricing, usage_sink=repo, tracer=make_tracer(settings))
+    client = LLMClient(settings, pricing, usage_sink=repo,
+                       budget_probe=make_repo_budget_probe(repo, guard),
+                       tracer=make_tracer(settings))
 ```
 
 - [ ] **Step 8: 验证通过（含全量回归）**
@@ -897,7 +919,7 @@ Expected: PASS —— 全量回归；默认 `traces_dir=""`（tracer=None），�
 
 - [ ] **Step 9: 更新 .env.example 与 README（三开关 + 手测）**
 
-`.env.example` 追加（在 M4-4 已有的两行密钥之后）：
+`.env.example` 追加（在既有两行密钥 `DASHSCOPE_API_KEY` / `DEEPSEEK_API_KEY` 之后）：
 ```bash
 # --- M5 可选开关（默认全部关闭，不影响既有行为） ---
 # 记忆后端：journal（默认）| graphiti（需要 uv sync --extra graph + Neo4j）
@@ -968,7 +990,7 @@ git commit -m "feat(obs): local JSONL tracing with LangSmith-compatible run reco
 - Create: `backend/tests/api/test_metrics.py`
 - Modify: `backend/app/llm/client.py`（`chat` / `chat_stream` 记 LLM 成败）
 - Modify: `backend/app/graph/nodes/memory.py`（`memory_query` 降级计数）
-- Modify: `backend/app/graph/nodes/npc.py`（`npc_silent` 降级计数）
+- Modify: `backend/app/graph/npc.py`（`npc_silent` 降级计数）
 - Modify: `backend/app/graph/nodes/gm.py`（`decision_invalid` / `narrate_failed` 降级计数）
 - Modify: `backend/app/graph/nodes/turn.py`（`budget_paused` 降级计数）
 - Modify: `backend/app/api/session.py`（`_drive` 记 `record_turn`）
@@ -1380,7 +1402,7 @@ from app.obs.counters import get_counters
             return {"memory_context": "", "degraded": {"memory_query": True}}
 ```
 
-`backend/app/graph/nodes/npc.py`：import 区追加 `from app.obs.counters import get_counters`；然后
+`backend/app/graph/npc.py`：import 区追加 `from app.obs.counters import get_counters`；然后
 ```python
         except Exception:
             reaction = {}  # 单个 NPC 失败 → 沉默占位（规格 §8），其余 NPC 不受影响
@@ -1394,7 +1416,7 @@ from app.obs.counters import get_counters
 
 `backend/app/graph/nodes/gm.py`：import 区追加 `from app.obs.counters import get_counters`；两处——
 
-validate（`build_validate_node` 重试耗尽后的失败返回，位于 `for _ in range(2)` 循环之外——M3-4 已把 validate 重写为循环结构，不存在内层 `except: return`）：
+validate（`build_validate_node` 重试耗尽后的失败返回，位于 `for attempt in range(2)` 循环之外——M3-4 已把 validate 重写为循环结构，不存在内层 `except: return`）：
 ```python
         return {"error": "decision_invalid", "decision": None,
                 "degraded": {"decision_invalid": True}}
@@ -1469,8 +1491,11 @@ from app.obs.counters import get_counters
 
 `backend/app/storage/repo.py`：在 `campaign_cost_total` 方法之后追加：
 ```python
-    def usage_totals(self) -> dict:
+    def usage_totals(self, campaign_id: str | None = None) -> dict:
+        """用量汇总；campaign_id 为空时全库（/metrics），否则限单战役（M5-5 usage API）。"""
         q = select(UsageRow)
+        if campaign_id is not None:
+            q = q.where(UsageRow.campaign_id == campaign_id)
         with Session(self.engine) as s:
             rows = s.exec(q).all()
         return {"calls": len(rows),
@@ -1504,7 +1529,7 @@ Expected: PASS —— 全量回归；计数为旁挂行为，不改变任何既�
 - [ ] **Step 9: Commit**
 
 ```bash
-git add backend/app/obs/counters.py backend/app/llm/client.py backend/app/graph/nodes/memory.py backend/app/graph/nodes/npc.py backend/app/graph/nodes/gm.py backend/app/graph/nodes/turn.py backend/app/api/session.py backend/app/storage/repo.py backend/app/api/app.py backend/tests/obs/test_counters.py backend/tests/graph/test_fallbacks_count.py backend/tests/api/test_metrics.py
+git add backend/app/obs/counters.py backend/app/llm/client.py backend/app/graph/nodes/memory.py backend/app/graph/npc.py backend/app/graph/nodes/gm.py backend/app/graph/nodes/turn.py backend/app/api/session.py backend/app/storage/repo.py backend/app/api/app.py backend/tests/obs/test_counters.py backend/tests/graph/test_fallbacks_count.py backend/tests/api/test_metrics.py
 git commit -m "feat(obs): /metrics with turn latency, llm success rate and fallback counters"
 ```
 
@@ -1808,10 +1833,10 @@ class CheckRequest(BaseModel):
 ```python
 from app.rules.check import CheckDifficulty, bonus_note, roll_check
 ```
-   - `build_resolve_checks_node` 整体替换为（基于 M4-4 的 secret 版提取 `_resolve_plain_check`，供 M5-7 战斗复用；secret 透传、事件可见性、payload `secret` 键原样保留）：
+   - `build_resolve_checks_node` 替换为（基于 M4-2 的 secret 版提取 `_resolve_plain_check`，供 M5-7 战斗复用；secret 透传、事件可见性、payload `secret` 键原样保留，**M3-4 结局纠正段一并保留——test_resolve_checks 有 2 例守护**；**M3-11 的明骰实时推送（`writer({"dice": ...})`）与 `id` 字段必须保留**——`test_ws_ending_e2e` 断言 dice 先于 token、`test_secret_dice` 断言明骰实时可达，删掉即红）：
 ```python
 def _resolve_plain_check(repo, state: GameState, chk: dict) -> dict:
-    """单条普通检定（M5-4 自 resolve_checks 提取）：掷骰 → DiceRecord → check 事件 → 结果行。"""
+    """单条普通检定（M5-4 自 resolve_checks 提取）：掷骰 → DiceRecord → 实时推送 → check 事件 → 结果行。"""
     campaign_id, branch_id, turn_id = state["campaign_id"], state["branch_id"], state["turn_id"]
     actor, skill = chk["actor"], chk["skill"]
     secret = bool(chk.get("secret"))
@@ -1820,9 +1845,20 @@ def _resolve_plain_check(repo, state: GameState, chk: dict) -> dict:
     r = roll_check(actor, skill, skill_value,
                    CheckDifficulty(chk.get("difficulty", "regular")), seed,
                    bonus=int(chk.get("bonus", 0)), penalty=int(chk.get("penalty", 0)))
-    repo.add_dice_record(campaign_id, branch_id, turn_id, r.actor, r.skill, r.skill_value,
-                         str(r.difficulty), r.roll, str(r.level), r.seed,
-                         secret=secret, bonus=r.bonus, penalty=r.penalty)
+    rid = repo.add_dice_record(campaign_id, branch_id, turn_id, r.actor, r.skill,
+                               r.skill_value, str(r.difficulty), r.roll, str(r.level),
+                               r.seed, secret=secret, bonus=r.bonus, penalty=r.penalty)
+    # 骰子先出（M3-11 既有）：明骰掷后立即经流式通道推送（先于叙事 token；收口快照按 id 去重兜底）；
+    # 暗骰不进实时流——流式通道无法按订阅者过滤，其可见性由收口快照统一兜底。
+    # stream_writer() 为 contextvar 机制（无参），提取到独立函数后照常可用；
+    # payload 追加 bonus/penalty：否则实时 DiceOverlay 与日志缺奖惩标注（收口按 id 去重不会补推）
+    if not secret:
+        writer = stream_writer()
+        writer({"dice": {"id": rid, "actor": r.actor, "skill": r.skill,
+                         "skill_value": r.skill_value, "difficulty": str(r.difficulty),
+                         "roll": r.roll, "level": str(r.level),
+                         "success": r.success, "seed": r.seed,
+                         "bonus": r.bonus, "penalty": r.penalty}})
     verdict = "成功" if r.success else "失败"
     note = bonus_note(r.bonus, r.penalty)
     repo.add_event(campaign_id, branch_id, turn_id, type="check",
@@ -1840,7 +1876,13 @@ def _resolve_plain_check(repo, state: GameState, chk: dict) -> dict:
 def build_resolve_checks_node(repo):
     def resolve_checks(state: GameState) -> dict:
         checks = (state.get("decision") or {}).get("checks", [])
-        return {"check_results": [_resolve_plain_check(repo, state, chk) for chk in checks]}
+        upd: dict = {"check_results": [_resolve_plain_check(repo, state, chk) for chk in checks]}
+        # 结局动作的检定失败 → 本回合不收束（M3-4 既有逻辑，勿丢：
+        # decide 判定时尚未掷骰，此处按结果纠正，防"检定失败但结局盲发"）
+        decision = state.get("decision") or {}
+        if decision.get("ending_reached") and any(not r["success"] for r in upd["check_results"]):
+            upd["decision"] = {**decision, "ending_reached": None}
+        return upd
 
     return resolve_checks
 ```
@@ -1850,41 +1892,50 @@ def build_resolve_checks_node(repo):
 ```python
 from app.rules.check import bonus_note
 ```
-   - `DECIDE_SYSTEM` 整体替换（在 M4-4 的 secret 版基础上叠加 bonus/penalty；M3-4 的 `clues_revealed/ending_reached` 两行保留在 `memory_queries` 之前，勿丢）：
+   - `DECIDE_SYSTEM` 整体替换（以**现状 gm.py 全文为基准**，仅两处增量：checks 元素说明加 `"bonus"/"penalty"` 两键；规则段追加第 10 条。M3-4A 的 `attitude_deltas` 行、M4-2 的 `secret` 说明、规则 1-9 全文逐字保留——test_gm_decide 有 2 例守护，勿用旧稿简化版）：
 ```python
 DECIDE_SYSTEM = (
-    "你是跑团主持人（COC 风格）。基于玩家行动与当前场景做结构化裁决，只输出一个 JSON 对象，字段：\n"
-    'intent_summary(str)、checks(数组，元素 {"actor","skill","difficulty"(regular|hard|extreme),'
-    '"secret"(bool，可选，默认 false),"bonus"(0-2，可选),"penalty"(0-2，可选)})、'
+    "你是跑团主持人（COC 风格）。基于玩家行动与当前场景做结构化裁决，"
+    "只输出一个 JSON 对象（不要 markdown 代码块、不要任何解释文字），字段：\n"
+    'intent_summary(str，一句话概括玩家意图)、'
+    'checks(数组，元素 {"actor","skill","difficulty"(regular|hard|extreme),"secret"(bool，可选，默认 false),"bonus"(int，可选，0-2，默认 0),"penalty"(int，可选，0-2，默认 0)})、'
     'proactive_npc_triggers(数组，元素 {"npc_id","trigger"})、'
     'scene_transition(null 或 {"to_scene","reason"})、'
     'clues_revealed(数组，元素为线索 id，仅当本回合玩家明确获得线索时填写)、'
-    'ending_reached(null 或模块给定结局 id，仅当叙事故意收束到结局时填写)、'
+    'ending_reached(null 或模块给定结局 id；命中结局条件时按收束规则必须填写)、'
+    'attitude_deltas(数组，元素 {"npc_id","delta"(整数),"reason"}，仅当玩家行为在本回合实质影响了某在场 NPC 对你们的态度时给出，最多 2 条，否则空数组；npc_id 只能用当前场景内列出的；delta 按行为严重程度取 -15..15，拿不准就不给)、'
     'memory_queries(字符串数组)。\n'
-    "规则：只为玩家的主动行动要求检定，每回合最多 2 个检定；NPC 只能用场景内列出的；"
-    "奖励/惩罚骰仅在情境明显有利/不利时给出（如充分准备、恶劣环境），每项最多 2，默认省略；"
-    "开场回合可以引入场面但不要要求检定；"
-    "secret=true 表示玩家角色无从察觉的暗骰（如暗中进行的观察或聆听），其检定与结果不得在叙事中直接暴露。"
+    "规则：\n"
+    "1. checks[].actor 必须用「玩家角色」列表里的角色 id；skill 从该角色卡的技能或属性名中逐字选取\n"
+    "2. 只为结果不确定、失败有代价的玩家主动行动要求检定（闲聊、开门等必成动作不要检定）；每回合最多 2 个\n"
+    "3. difficulty：普通行动 regular，专业或高风险 hard，近乎极限才用 extreme\n"
+    "4. proactive_npc_triggers 仅当玩家行动直接涉及该 NPC、或场景需要其反应时给出；npc_id 只能用「在场 NPC」中列出的\n"
+    "5. scene_transition 仅当玩家成功移向相邻场景时给出，to_scene 必须从「可去场景」中选，否则填 null\n"
+    "6. memory_queries 为 0~3 个简短检索词，仅在需要回忆前情时给出\n"
+    "7. 开场回合可以引入场面与 NPC，但不要要求检定；\n"
+    "8. 玩家与 NPC 的社交行动即使检定失败，也要让该 NPC 在场回应（冷淡、回避、暗示皆可），不得让场面停滞或写成拒绝交流。\n"
+    "9. secret=true 表示玩家角色无从察觉的暗骰（如暗中进行的观察或聆听）；其检定与结果不得在叙事中直接暴露。\n"
+    "10. 奖励/惩罚骰（bonus/penalty）仅在情境明显有利/不利时给出（如充分准备、恶劣环境），各最多 2，默认省略。"
 )
 ```
-   - `_check_lines` 整体替换（无奖惩且非暗骰时输出与既有逐字符一致；暗骰标注来自 M4-4，勿丢）：
+   - `_check_lines` 整体替换（**必须保留 `_char_name`**——`c['actor']` 是角色 id，直拼会把 pc_1 泄进提示词，test_gm_narrate 守护；无奖惩且非暗骰时输出与既有逐字符一致；暗骰标注来自 M4-2，勿丢）：
 ```python
 def _check_lines(state: GameState) -> str:
     lines = []
     for c in state.get("check_results", []):
         verdict = "成功" if c.get("success") else "失败"
         dice_note = bonus_note(int(c.get("bonus", 0)), int(c.get("penalty", 0)))
-        secret_note = ("（暗骰：不得在叙事中直接暴露该检定与结果，只可化为隐约的线索或不安感）"
-                       if c.get("secret") else "")
-        lines.append(f"- {c['actor']} 的「{c['skill']}」：{c['roll']}/{c['skill_value']} "
-                     f"{dice_note}→ {c['level']}（{verdict}）{secret_note}")
+        note = ("（暗骰：不得在叙事中直接暴露该检定与结果，只可化为隐约的线索或不安感）"
+                if c.get("secret") else "")
+        lines.append(f"- {_char_name(state, c.get('actor'))}的「{c['skill']}」："
+                     f"{c['roll']}/{c['skill_value']} {dice_note}→ {c['level']}（{verdict}）{note}")
     return "\n".join(lines) or "（本回合无检定）"
 ```
 
 - [ ] **Step 10: 验证存储与节点层通过**
 
 Run: `cd backend; uv run pytest tests/storage tests/graph -q`
-Expected: PASS —— 迁移 5 例（3 既有 + 2 新增）、resolve_checks 7 例（5 既有 + 2 新增）；check_results 与事件 payload 新增键向后兼容，其余 graph/storage 全绿
+Expected: PASS —— 迁移 5 例（3 既有 + 2 新增）、resolve_checks 9 例（7 既有 + 2 新增）；check_results 与事件 payload 新增键向后兼容，其余 graph/storage 全绿
 
 - [ ] **Step 11: 实现 API 与前端（session / types / DiceOverlay / DiceLogPanel / styles）**
 
@@ -1906,9 +1957,9 @@ export type DicePayload = {
 };
 ```
 
-3. `frontend/src/components/DiceOverlay.tsx`：`dice-level` 一行后插入奖惩标注（其余 JSX 不动）：
+3. `frontend/src/components/DiceOverlay.tsx`：`dice-level` 一行后插入奖惩标注（其余 JSX 不动；现状该行含 `revealed` 门控——逐字照抄现状行，勿用旧稿的简化行）：
 ```tsx
-        <div className="dice-level">{LEVEL_LABEL[dice.level] ?? dice.level}</div>
+        <div className="dice-level">{revealed ? LEVEL_LABEL[dice.level] ?? dice.level : "……"}</div>
         {(dice.bonus || dice.penalty) ? (
           <div className="dice-note">
             {dice.bonus ? `奖励骰 ×${dice.bonus}` : ""}
@@ -1927,17 +1978,17 @@ export type DicePayload = {
               </li>
 ```
 
-5. `frontend/src/styles.css`：在 `.dice-level { margin-top: 6px; }` 规则之后追加：
+5. `frontend/src/styles.css`：在既有 `.dice-level` 规则（现状 `margin-top: 8px`，以当场文件为准）之后追加：
 ```css
 .dice-note { margin-top: 4px; font-size: 13px; color: #9aa7b8; }
 ```
 
-6. 追加 `frontend/src/components/__tests__/DiceOverlay.test.tsx`（既有 `describe` 块内、最后一个 `it` 之后）：
+6. 追加 `frontend/src/components/__tests__/DiceOverlay.test.tsx`（既有 `describe` 块内、最后一个 `it` 之后；`act` 已在文件首行 import，计时器推进须用 `act` 包裹——与既有用例同款）：
 ```tsx
   it("annotates bonus and penalty dice", () => {
     vi.useFakeTimers();
     render(<DiceOverlay dice={{ ...DICE, bonus: 1, penalty: 2 }} onDone={() => {}} />);
-    vi.advanceTimersByTime(2000);
+    act(() => { vi.advanceTimersByTime(1300); });   // 定格后标注在场（标注不受 revealed 门控）
     expect(screen.getByText(/奖励骰 ×1/)).toBeInTheDocument();
     expect(screen.getByText(/惩罚骰 ×2/)).toBeInTheDocument();
   });
@@ -1946,7 +1997,7 @@ export type DicePayload = {
 - [ ] **Step 12: 验证前端与 API 层**
 
 Run: `cd frontend; npm run test`
-Expected: PASS —— DiceOverlay 3 例（2 既有 + 1 新增）+ 其余前端测试全绿
+Expected: PASS —— DiceOverlay 5 例（4 既有 + 1 新增）+ 其余前端测试全绿
 
 Run: `cd backend; uv run pytest tests/api -q`
 Expected: PASS —— `_dice_payload` 新增键不破坏既有 REST/WS 断言（类型一致性抽查：`DiceRecordRow` ↔ `_dice_payload` ↔ 前端 `DicePayload` 三处字段名与可选性一致）
@@ -2089,6 +2140,23 @@ vi.mock("../../api/rest", () => ({
 }));
 ```
 
+同时「shows current scene name in sidebar」用例（现为同步）的 h3 断言需要更新：CostPanel 拉取成功后侧栏会多出一个「成本」标题，该用例改为 `async`、等待 CostPanel 挂载后再断言：
+```tsx
+  it("shows current scene name in sidebar between character and npc panels", async () => {
+    render(<Room session={SESSION} onLeave={() => {}} />);
+    act(() => {
+      handlers.onEvent!({ seq: 1, type: "scene", visibility: "all",
+                          payload: { scene_id: "square", name: "镇中心广场",
+                                     description: "石砌广场。", npcs: [] } });
+    });
+    const side = screen.getByRole("complementary");
+    expect(within(side).getByText("镇中心广场")).toBeInTheDocument();
+    await within(side).findByText("成本");              // CostPanel 异步挂载（mock 已 resolve）
+    const headings = [...side.querySelectorAll("h3")].map((h) => h.textContent);
+    expect(headings).toEqual(["角色", "所在位置", "已结识人物", "线索（0）", "检定记录", "成本"]);
+  });
+```
+
 - [ ] **Step 6: 验证失败**
 
 Run: `cd frontend; npm run test`
@@ -2166,7 +2234,7 @@ export default function CostPanel({ campaignId }: { campaignId: string }) {
 - [ ] **Step 8: 验证通过 + Commit**
 
 Run: `cd frontend; npm run test`
-Expected: PASS —— CostPanel 1 例 + Room 2 例（mock 更新后）+ 全量前端测试
+Expected: PASS —— CostPanel 1 例 + Room 6 例（mock 更新后）+ 全量前端测试
 
 ```bash
 git add backend/app/storage/repo.py backend/app/api/routes.py backend/tests/api/test_usage_api.py frontend/src/types.ts frontend/src/api/rest.ts frontend/src/components/CostPanel.tsx frontend/src/components/__tests__/CostPanel.test.tsx frontend/src/views/Room.tsx frontend/src/views/__tests__/Room.test.tsx frontend/src/styles.css
@@ -2290,12 +2358,14 @@ def resolve_attack(actor: str, skill: str, attack_value: int,
                    seed: int, difficulty: CheckDifficulty = CheckDifficulty.REGULAR,
                    bonus: int = 0, penalty: int = 0) -> CombatOutcome:
     rng = random.Random(seed)          # 单一 seed 派生三条子流：可复现且互不干扰
-    attack = roll_check(actor, skill, attack_value, difficulty, rng.randbits(64),
+    # randbits 必须 < 2^63：seed 经 M5-7 落 dice 表（SQLite INTEGER 为有符号 64 位），
+    # randbits(64) 约半数 ≥ 2^63 会溢出（M2 同根因事故，勿改回）
+    attack = roll_check(actor, skill, attack_value, difficulty, rng.randbits(63),
                         bonus=bonus, penalty=penalty)
     defense = roll_check(defender, "闪避", defense_value, CheckDifficulty.REGULAR,
-                         rng.randbits(64))
+                         rng.randbits(63))
     hit = attack.success and not defense.success
-    damage = roll_damage(rng.randbits(64), damage_dice) if hit else 0
+    damage = roll_damage(rng.randbits(63), damage_dice) if hit else 0
     return CombatOutcome(attack=attack, defense=defense, hit=hit, damage=damage)
 ```
 
@@ -2362,9 +2432,8 @@ class NpcCombat(BaseModel):
         parse_damage_dice(v)
         return v
 ```
-   - `NpcDef` 尾部追加字段：
+   - `NpcDef` 尾部追加字段（`initial_attitude: int = 50` 是 M4-3 既有字段，勿重复添加——只加下面一行）：
 ```python
-    initial_attitude: int = 50
     combat: NpcCombat | None = None      # 存在即可被攻击（M5-7）；缺省 NPC 不可被攻击
 ```
 
@@ -2404,7 +2473,7 @@ git commit -m "feat(rules): lightweight combat resolution and npc combat stats i
 - Test: `backend/tests/graph/test_combat.py`（新建）、`backend/tests/graph/test_endings.py`（追加 1 例）
 
 **Interfaces:**
-- Consumes: `resolve_attack / CombatOutcome`（M5-6）、`_resolve_plain_check`（M5-4）、`bonus_note`（M5-4）、`build_validate_node(client, module)` 循环版（M3-4）、`_guarded` / `_skill_value` / `new_seed` / `add_dice_record(..., secret=False, bonus=0, penalty=0)`（M2 / M4-4 / M5-4）、`get_counters().record_fallback`（M5-3）
+- Consumes: `resolve_attack / CombatOutcome`（M5-6）、`_resolve_plain_check`（M5-4）、`bonus_note`（M5-4）、`build_validate_node(client, module)` 循环版（M3-4）、`_guarded` / `_skill_value` / `new_seed` / `add_dice_record(..., secret=False, bonus=0, penalty=0)`（M2 / M4-2 / M5-4）、`get_counters().record_fallback`（M5-3）
 - Produces：
   - `GameState.npc_hp: dict[str, int]`（intake 从 L2 快照重建，缺省 = 各 NPC 的 `combat.hp`）；`GameState.combat_log: list[dict]`（本回合战斗记录）
   - `CheckRequest.target: str | None = None`
@@ -2756,24 +2825,31 @@ def build_intake_node(repo, module, guard):
     }
 ```
 
-4. `fallback` 整体替换为（追加两键；M3-4 的 `ending_reached` 保留）：
+4. `fallback` 整体替换为（追加两键；**保留 `"error": state.get("error")` 尾部键**——失败原因供调用方读取，勿丢；M3-4 的 `ending_reached` 保留）：
 ```python
 def fallback(state: GameState) -> dict:
     """失败不推进：清空本轮 pending，保留 error 供调用方读取（wait_input 恢复时清除）。"""
     return {"player_inputs": [], "decision": None, "decision_raw": "",
             "check_results": [], "npc_reactions": {}, "narration": "",
             "narration_segments": [], "degraded": {}, "ending_reached": None,
-            "combat_log": [], "npc_hp": {}}
+            "combat_log": [], "npc_hp": {},
+            "error": state.get("error")}
 ```
 
-5. `build_resolve_checks_node` 替换为（过滤 target 条目；`_resolve_plain_check` 不动）：
+5. `build_resolve_checks_node` 替换为（过滤 target 条目；**M3-4 结局纠正段必须保留**——test_resolve_checks 有 2 例守护；`_resolve_plain_check` 不动）：
 ```python
 def build_resolve_checks_node(repo):
     def resolve_checks(state: GameState) -> dict:
         checks = (state.get("decision") or {}).get("checks", [])
         # M5-7：带 target 的条目已由 combat_resolve 结算，这里只处理普通检定
-        return {"check_results": [_resolve_plain_check(repo, state, chk)
-                                  for chk in checks if not chk.get("target")]}
+        results = [_resolve_plain_check(repo, state, chk)
+                   for chk in checks if not chk.get("target")]
+        upd: dict = {"check_results": results}
+        # 结局动作的检定失败 → 本回合不收束（M3-4 既有逻辑，勿丢）
+        decision = state.get("decision") or {}
+        if decision.get("ending_reached") and any(not r["success"] for r in results):
+            upd["decision"] = {**decision, "ending_reached": None}
+        return upd
 
     return resolve_checks
 ```
@@ -2857,7 +2933,7 @@ def build_combat_resolve_node(repo, module):
 
 - [ ] **Step 5: 实现 gm.py（validate 规范化 / 战斗行 / 提示词 / DECIDE_SYSTEM）**
 
-1. `build_validate_node` 整体替换为（新增 `_normalize_targets`，在成功分支调用；循环结构与 repair 语义为 M3-4 原样，**M5-3 在循环外 return 前的 `get_counters().record_fallback("decision_invalid")` 行保留勿丢**）：
+1. `build_validate_node` 整体替换为（新增 `_normalize_targets`，在成功分支调用；**循环/repair 结构与 M3-4 逐字一致，不得简化**——`for attempt in range(2)` + `if attempt == 1: break`、repair 为 `[system: DECIDE_SYSTEM, user]` 两条（test_gm_decide 断言 `msgs[0].role == "system"`）、请求异常后 `break` 无可修复；**M5-3 在循环外 return 前的 `get_counters().record_fallback("decision_invalid")` 行保留勿丢**）：
 ```python
 def build_validate_node(client: LLMClient, module=None) -> Callable[[GameState], dict]:
     def _check_refs(decision) -> str | None:
@@ -2897,7 +2973,7 @@ def build_validate_node(client: LLMClient, module=None) -> Callable[[GameState],
     def validate_decision(state: GameState) -> dict:
         raw = state.get("decision_raw", "")
         repair_msg = ""
-        for _ in range(2):  # 首次 + repair 重试恰好 1 次（规格 §8）
+        for attempt in range(2):  # 首次 + repair 重试恰好 1 次（规格 §8）
             try:
                 decision = parse_decision_json(raw)
                 ref_error = _check_refs(decision)
@@ -2907,14 +2983,20 @@ def build_validate_node(client: LLMClient, module=None) -> Callable[[GameState],
                 repair_msg = ref_error
             except Exception as exc:
                 repair_msg = str(exc)
-            messages = [ChatMessage(
-                role="user",
-                content=(f"你上次的输出不合格（{repair_msg}）。"
-                         f"请只输出合法 JSON，字段要求不变。上次输出：\n{raw}"))]
+            if attempt == 1:
+                break  # repair 后仍不合格：放弃，不再追加调用
+            repair = [
+                ChatMessage(role="system", content=DECIDE_SYSTEM),
+                ChatMessage(
+                    role="user",
+                    content=(f"你上次的输出不合格（{repair_msg}）。"
+                             f"请只输出合法 JSON，字段要求不变。上次输出：\n{raw}")),
+            ]
             try:
-                raw = client.chat("gm", messages, _ctx(state), cheap=_cheap(state))
+                raw = client.chat("gm", repair, _ctx(state), cheap=_cheap(state))
             except Exception as exc:
                 repair_msg = str(exc)
+                break  # 请求本身失败：无可修复
         get_counters().record_fallback("decision_invalid")
         return {"error": "decision_invalid", "decision": None,
                 "degraded": {"decision_invalid": True}}
@@ -2938,53 +3020,65 @@ def _combat_lines(state: GameState) -> str:
     return "\n".join(lines)
 ```
 
-3. `gm_narrate` 内 `user = (...)` 组装替换为（无战斗记录时 `combat_block == ""`，提示词与 M3-3 逐字符一致）：
+3. `gm_narrate` 内 `user = (...)` 组装替换为（**仅插入 `combat_block` 一段**——M3-3 的 `prev_line` / `clue_line` / `tail_instr` 与 M3-4 的 `ending_line` 全部逐字保留，不得用旧稿的简化拼接；无战斗记录时 `combat_block == ""`，提示词与接入前逐字符一致）：
 ```python
         combat_lines = _combat_lines(state)
         combat_block = f"战斗结算：\n{combat_lines}\n" if combat_lines else ""
         user = (
-            f"{opening_line}{ending_line}"
+            f"{opening_line}"
+            f"{ending_line}"
+            f"{prev_line}"
             f"当前场景：{scene.name}\n{scene.description}\n"
             f"玩家行动：\n{inputs_txt}\n"
             f"检定结果：\n{_check_lines(state)}\n"
             f"{combat_block}"
             f"NPC 反应：\n{_reaction_lines(state, module)}\n"
-            "请输出本回合的完整叙事。"
+            f"{clue_line}"
+            f"{tail_instr}"
         )
 ```
 
-4. `DECIDE_SYSTEM` 整体替换（在 M5-4 版基础上加 target 字段说明与规则句；`clues_revealed/ending_reached` 两行与 bonus/penalty 说明保留）：
+4. `DECIDE_SYSTEM` 整体替换（**= M5-4 修正版全文 + target**：checks 元素追加 `"target"` 键、规则段追加第 11 条；其余逐字与 M5-4 相同，勿再退回旧稿简化版）：
 ```python
 DECIDE_SYSTEM = (
-    "你是跑团主持人（COC 风格）。基于玩家行动与当前场景做结构化裁决，只输出一个 JSON 对象，字段：\n"
-    'intent_summary(str)、checks(数组，元素 {"actor","skill","difficulty"(regular|hard|extreme),'
-    '"secret"(bool，可选，默认 false),"bonus"(0-2，可选),"penalty"(0-2，可选),'
-    '"target"(str，可选，攻击目标 NPC 的 id)})、'
+    "你是跑团主持人（COC 风格）。基于玩家行动与当前场景做结构化裁决，"
+    "只输出一个 JSON 对象（不要 markdown 代码块、不要任何解释文字），字段：\n"
+    'intent_summary(str，一句话概括玩家意图)、'
+    'checks(数组，元素 {"actor","skill","difficulty"(regular|hard|extreme),"secret"(bool，可选，默认 false),"bonus"(int，可选，0-2，默认 0),"penalty"(int，可选，0-2，默认 0),"target"(str，可选，攻击目标 NPC 的 id)})、'
     'proactive_npc_triggers(数组，元素 {"npc_id","trigger"})、'
     'scene_transition(null 或 {"to_scene","reason"})、'
     'clues_revealed(数组，元素为线索 id，仅当本回合玩家明确获得线索时填写)、'
-    'ending_reached(null 或模块给定结局 id，仅当叙事故意收束到结局时填写)、'
+    'ending_reached(null 或模块给定结局 id；命中结局条件时按收束规则必须填写)、'
+    'attitude_deltas(数组，元素 {"npc_id","delta"(整数),"reason"}，仅当玩家行为在本回合实质影响了某在场 NPC 对你们的态度时给出，最多 2 条，否则空数组；npc_id 只能用当前场景内列出的；delta 按行为严重程度取 -15..15，拿不准就不给)、'
     'memory_queries(字符串数组)。\n'
-    "规则：只为玩家的主动行动要求检定，每回合最多 2 个检定；NPC 只能用场景内列出的；"
-    "奖励/惩罚骰仅在情境明显有利/不利时给出（如充分准备、恶劣环境），每项最多 2，默认省略；"
-    "开场回合可以引入场面但不要要求检定；"
-    "target 仅在玩家攻击当前场景内某个 NPC 时填写（被攻击者必须可被攻击），其余检定不要填 target；"
-    "secret=true 表示玩家角色无从察觉的暗骰（如暗中进行的观察或聆听），其检定与结果不得在叙事中直接暴露。"
+    "规则：\n"
+    "1. checks[].actor 必须用「玩家角色」列表里的角色 id；skill 从该角色卡的技能或属性名中逐字选取\n"
+    "2. 只为结果不确定、失败有代价的玩家主动行动要求检定（闲聊、开门等必成动作不要检定）；每回合最多 2 个\n"
+    "3. difficulty：普通行动 regular，专业或高风险 hard，近乎极限才用 extreme\n"
+    "4. proactive_npc_triggers 仅当玩家行动直接涉及该 NPC、或场景需要其反应时给出；npc_id 只能用「在场 NPC」中列出的\n"
+    "5. scene_transition 仅当玩家成功移向相邻场景时给出，to_scene 必须从「可去场景」中选，否则填 null\n"
+    "6. memory_queries 为 0~3 个简短检索词，仅在需要回忆前情时给出\n"
+    "7. 开场回合可以引入场面与 NPC，但不要要求检定；\n"
+    "8. 玩家与 NPC 的社交行动即使检定失败，也要让该 NPC 在场回应（冷淡、回避、暗示皆可），不得让场面停滞或写成拒绝交流。\n"
+    "9. secret=true 表示玩家角色无从察觉的暗骰（如暗中进行的观察或聆听）；其检定与结果不得在叙事中直接暴露。\n"
+    "10. 奖励/惩罚骰（bonus/penalty）仅在情境明显有利/不利时给出（如充分准备、恶劣环境），各最多 2，默认省略。\n"
+    "11. target 仅在玩家攻击当前场景内某个 NPC 时填写（被攻击者必须可被攻击），其余检定不要填 target。"
 )
 ```
 
 - [ ] **Step 6: 实现 main.py（路由与装配）**
 
-1. import 行替换：
+1. import 行替换（**替换原文按现状逐字抄**——现状已含 `build_apply_transition_node` 的六符号版，旧稿的五符号原文已不存在）：
 ```python
-from app.graph.nodes.turn import (build_intake_node, build_post_turn_node,
-                                  build_resolve_checks_node, fallback, wait_input)
+from app.graph.nodes.turn import (build_apply_transition_node, build_intake_node,
+                                  build_post_turn_node, build_resolve_checks_node,
+                                  fallback, wait_input)
 ```
 →
 ```python
-from app.graph.nodes.turn import (build_combat_resolve_node, build_intake_node,
-                                  build_post_turn_node, build_resolve_checks_node,
-                                  fallback, wait_input)
+from app.graph.nodes.turn import (build_apply_transition_node, build_combat_resolve_node,
+                                  build_intake_node, build_post_turn_node,
+                                  build_resolve_checks_node, fallback, wait_input)
 ```
 
 2. `_route_after_validate` 替换并追加新路由（放在 `_route_after_validate` 之后）：
@@ -3082,7 +3176,7 @@ git commit -m "feat(graph): combat resolution node with target routing and npc h
 2. **本会话内批量执行**：按 executing-plans 流水线推进，在检查点停顿复核。
 
 交接前确认：
-- M2（Task 1-24）、M3（T1-T17）、M4（M4-1~M4-7）全部完成且 `cd backend; uv run pytest -q` 全绿；`cd frontend; npm run test` 全绿；
+- M2（Task 1-24）、M3（T1-T17）、M4（M4-1~M4-4）全部完成且 `cd backend; uv run pytest -q` 全绿；`cd frontend; npm run test` 全绿；
 - 可选依赖无需预装（M5-1/M5-2 的回退路径即验收路径；如需真联 Graphiti / LangSmith，再 `uv sync --extra graph --extra observability` 并按 `.env.example` 配置）；
 - 战斗验收含手测项：运行示例模组（Web 或 CLI），对 `misty_hollow` 的 `whisperer` 发起攻击，观察骰子行 ×2（攻击 + 闪避）、叙事出现"战斗结算"与 HP 变化、败亡后不再可被攻击。
 
