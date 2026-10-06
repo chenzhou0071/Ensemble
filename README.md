@@ -135,6 +135,25 @@ npm run dev
 
 浏览器打开 http://localhost:5173 。前端已配置 `/api` 与 `/ws` 代理到 8000 端口。
 
+## Docker 一键启动 / 服务器部署
+
+```bash
+cp .env.example .env      # 填入 DASHSCOPE_API_KEY / DEEPSEEK_API_KEY
+docker compose up -d --build
+# 浏览器打开 http://localhost/
+```
+
+数据存放在 `./data/ensemble.db`；腾讯云部署全流程见 `docs/deploy-tencent.md`。
+
+## 单人验收清单（浏览器手测）
+
+- [ ] 打开 http://localhost/ → 新建战役 → 提交行动即结算（无等待窗口）
+- [ ] 结算叙事流式显示；结算期间输入框禁用，结算完自动恢复可输入
+- [ ] 刷新页面 → 历史完整回放，可继续行动
+- [ ] 换一个浏览器（或清空 localStorage）打开 → 大厅看不到已建战役
+- [ ] 玩到结局 → 结局内容完整展示
+- [ ] GM 暗骰不出现在骰子日志中
+
 ## 测试
 
 ```bash
@@ -165,7 +184,7 @@ cd frontend; npm run test             # 前端组件 / 状态层测试
 
 - [x] **M1–M2** 内核：LangGraph 图、规则层、存储层、CLI
 - [x] **M3** 可玩 Web：FastAPI + WS + React 前端（当前）
-- [ ] **M4** 多人联机与部署：邀请码、多玩家回合协调、Docker 容器化
+- [ ] **M4** 单人化与容器化：提交即结算、暗骰、战役归属隔离、Docker 生产镜像（公网部署随 M5 完成后统一进行）
 - [ ] **M5** 增强：Graphiti 记忆图、可观测性、奖惩骰、战斗子图（可选开关）
 
 ## 致谢
