@@ -1788,10 +1788,10 @@ Expected: FAIL —— `TypeError: add_dice_record() got an unexpected keyword ar
 def migrate_schema(engine) -> None:
     """轻量迁移清单：每列一行，幂等可重复执行。"""
     with engine.begin() as conn:
-        _ensure_column(conn, "campaign", "owner_client_id",
-                       "owner_client_id VARCHAR NOT NULL DEFAULT ''")
         _ensure_column(conn, "dicerecordrow", "secret",
                        "secret BOOLEAN NOT NULL DEFAULT 0")
+        _ensure_column(conn, "campaign", "owner_client_id",
+                       "owner_client_id VARCHAR NOT NULL DEFAULT ''")
         _ensure_column(conn, "dicerecordrow", "bonus",
                        "bonus INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "dicerecordrow", "penalty",
@@ -1870,7 +1870,8 @@ def _resolve_plain_check(repo, state: GameState, chk: dict) -> dict:
                    visibility="gm" if secret else "all")
     return {"actor": r.actor, "skill": r.skill, "roll": r.roll,
             "skill_value": r.skill_value, "level": str(r.level),
-            "success": r.success, "seed": r.seed, "secret": secret,
+            "success": r.success, "seed": r.seed,
+            "difficulty": str(r.difficulty), "secret": secret,
             "bonus": r.bonus, "penalty": r.penalty}
 
 
