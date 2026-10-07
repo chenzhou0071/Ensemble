@@ -1,0 +1,164 @@
+meta:
+  id: midnight_act
+  title: 子夜那一折
+  author: Ensemble
+  version: "0.1"
+  system: coc-lite
+
+opening:
+  narration: |
+    青溪镇的雨下了一整日，到掌灯时分也没停。你们撑伞走过镇口的石桥，桥头的纸烛铺还亮着灯，铺檐下那盏灯笼被雨丝抽得轻轻打转。
+    铺子斜对面就是听雨楼——歇业了十几年的旧戏楼，门楼上的漆皮几乎落尽，台阶缝里长满了青苔。可今晚，楼上分明亮着一线灯火，隐隐有唱戏的调子从雨声里浮出来：是旦角的喉音，水袖一样慢，一个字要磨上许久。镇上的老人说起这事都摇头——自打十三年前那场火，楼就再没开过锣；可这戏声，一年年照样地唱。
+    还有一个传闻，你们一到镇上就听人念叨：听雨楼撑不了几日就要拆了。偏偏这样的雨夜，锣鼓还没歇。
+    纸烛铺的老掌柜推开半扇窗，把你们上下打量了一遍，声音压得极低：「这个时辰，真要进楼去？……也罢。楼里那位程班主，是个体面人，见了面，好好说话。只有一句你们记牢——子时前后，楼里的规矩最大。别乱动东西，更别挡着人家的戏。」
+  scene_id: street
+  player_goal: 在听雨楼拆掉之前，弄清「子夜那一折」为何十几年唱不完，并决定这场戏的结局。
+
+scenes:
+  - id: street
+    name: 石桥街口
+    description: 青溪石桥的桥头，纸烛铺的灯笼在雨里轻轻晃，桥墙上还糊着半张被打湿的旧海报；过了桥就是镇外官道，斜对面则是听雨楼的旧门楼——楼上亮着一线灯火，戏声时断时续。门楼旁的山墙根下，一条窄巷黑黢黢地绕向楼后。
+    npcs: [shopkeeper]
+    exits: [yard, alley]
+    clues: [clue_poster]
+  - id: alley
+    name: 后巷河埠
+    description: 戏楼背后的窄巷，青石阶一直下到河埠头，阶上扣着一只底子烂穿的旧木桶——当年挑水救火的人丢下的；巷子深处，一扇小门通着戏楼后院。
+    npcs: []
+    exits: [street, backyard]
+    clues: []
+  - id: yard
+    name: 前院
+    description: 听雨楼的前院，荒草没踝，檐下只点着一盏细灯笼；院中立着一块褪色的水牌，正门虚掩，戏声从门缝里漫出来，檐下一道旧回廊绕向楼侧。
+    npcs: [azhi]
+    exits: [street, hall, corridor]
+    clues: [clue_timetable]
+  - id: corridor
+    name: 环廊
+    description: 环着戏楼的旧回廊，栏杆落满灰，堆着几口上了年头的箱笼；从这里能绕去正厅，也能通后台与化妆间的侧门。
+    npcs: []
+    exits: [yard, hall, backstage, dressing]
+    clues: []
+  - id: hall
+    name: 台下正厅
+    description: 池座的长凳积着灰，唯独第一排正中的太师椅擦得发亮；小几上搁着一盅热茶，茶位正对着空无一人的戏台。厅侧一道窄木梯，通向二楼看台。
+    npcs: [master, xie_owner]
+    exits: [yard, corridor, stage, balcony]
+    clues: [clue_chair]
+  - id: balcony
+    name: 二楼看台
+    description: 二楼的雅座隔着一圈雕花栏杆，正对戏台，坐在栏边能看清台板上的每一道缝；西墙有一道熏黑的焦痕，从楼下台口一路爬上来，消失在尽头一扇木门旁边。
+    npcs: []
+    exits: [hall, loft]
+    clues: [clue_scorch_trail]
+  - id: stage
+    name: 戏台
+    description: 台上还摆着没撤的砌末，下场门的衣架上挂着一件旦角戏服，颜色旧得发暗，衣摆却一丝灰也没有；台板上隐约留着两种脚印，一双布底，一双绣鞋。下场门通着后台。
+    npcs: [wan_niang]
+    exits: [hall, backstage]
+    clues: [clue_costume]
+  - id: backstage
+    name: 后台
+    description: 侧幕后的后台窄而长，一面旧鼓立在架子上，鼓皮蒙灰，唯独鼓心一块被摩挲得发亮；化妆间与库房的门开在这一条廊上，后门通向后院。
+    npcs: [deaf_yue]
+    exits: [corridor, stage, dressing, storeroom, backyard]
+    clues: []
+  - id: dressing
+    name: 化妆间
+    description: 镜面碎了一角，桌上摊着半干的油彩；墙角是班主的一副旧铺盖，白灰剥落的墙面上露出底下的旧墨迹。
+    npcs: []
+    exits: [backstage, corridor]
+    clues: [clue_wall_scratches]
+  - id: storeroom
+    name: 库房
+    description: 戏箱与行头箱码得整整齐齐，樟脑味混着潮气；靠里墙立着一架磨得发亮的木梯，直通顶上的阁楼板门，梯脚落着几星从板缝里漏下的灰。
+    npcs: []
+    exits: [backstage, loft]
+    clues: [clue_chest]
+  - id: loft
+    name: 阁楼
+    description: 阁楼低矮闷热，梁上留着经年的火痕；旧物堆得齐整，最上面一只木匣没落灰，匣盖虚掩着，身侧那扇木门通着二楼看台。
+    npcs: []
+    exits: [storeroom, balcony]
+    clues: [clue_burnt_page]
+  - id: backyard
+    name: 后院
+    description: 后院有一口老井，井边堆着纸灰，风一吹，灰里就翻出没烧尽的信纸角；院角一扇窄门通后巷，另有一扇门接回楼内的后台。
+    npcs: []
+    exits: [alley, backstage]
+    clues: [clue_ash_letters]
+
+npcs:
+  - id: master
+    name: 程守信
+    persona: 春和班的班主，六十上下，腰背始终挺直，嗓子却早哑了。待人和气，唯独「子时那一折戏」寸步不让；听人提起沈晚娘的名字会沉默很久。
+    knowledge: [子时开戏的规矩, 那折戏为什么不能唱完, 他与沈晚娘的旧事]
+    initial_attitude: 35
+  - id: azhi
+    name: 阿芷
+    persona: 班主从雪地里捡回来的孤女，十五六岁，机灵嘴硬，把听雨楼当自己家守着；夜里巡楼从不点灯，对生人不冷不热。
+    knowledge: [师父每夜子时开戏的规矩, 楼上的规矩（师父不许人上楼）, 后院夜里的火光]
+    initial_attitude: 55
+  - id: deaf_yue
+    name: 聋爷
+    persona: 打了一辈子鼓的老鼓师，半聋，靠看人嘴形听戏；一晚上说不满十句话，开口一句是一句。
+    knowledge: [十三年前那场大火, 《子夜歌》末折的唱词, 班主每夜在哪个字前停下, 烧剩的旧物都堆在阁楼上]
+    initial_attitude: 45
+  - id: wan_niang
+    name: 沈晚娘
+    persona: 春和班当年的旦角台柱，一身旧戏服水袖；只在于子时戏起时显现在台上，隔着一双水袖与人说话，言语清醒温和，与「厉鬼」的传闻全然不同。
+    knowledge: [她真正的心愿, 末句唱词的意思, 当年她为什么回身上楼]
+    initial_attitude: 50
+  - id: shopkeeper
+    name: 老掌柜
+    persona: 桥头纸烛铺的掌柜，在青溪镇守了四十年铺子；十三年前戏楼走水，他是挑水救火的人之一。嘴碎心软，什么都肯说，就是不肯夜里进楼。
+    knowledge: [十三年前火灾的经过, 程班主这些年托他经手的事, 谢家拆楼的期限]
+    initial_attitude: 50
+  - id: xie_owner
+    name: 谢延年
+    persona: 听雨楼东家谢家的后人，管着镇上几间铺面；不是狠心人，只是账目要平——拆楼的文书已经备好，只等日子。
+    knowledge: [拆楼的日子定在七日后, 谢家老爷子临终的嘱托, 当年火后谢家的赔补]
+    initial_attitude: 50
+
+clues:
+  - id: clue_poster
+    content: 桥头墙上还糊着半张旧海报：「春和班·压轴《子夜歌》——旦角沈晚娘」。落款日期被雨洇花了，只剩「……子时开锣」几个字。
+    unlocks: []
+  - id: clue_timetable
+    content: 前院的水牌上只列着一出戏：每日子时，《子夜歌·归途》。字是新描的墨，一层压着一层——像是年年描、夜夜描。
+    unlocks: []
+  - id: clue_chair
+    content: 第一排正中的太师椅擦得发亮，扶手上搭着汗巾，小几上那盅茶还冒着热气；空着的椅子正对着戏台，像是在候一位从不露面的看客。
+    unlocks: []
+  - id: clue_costume
+    content: 挂在下场门衣架上的旦角戏服旧得发暗，衣摆却一丝灰也没有；台板上留着两种新脚印，一双布底，一双绣鞋。
+    unlocks: []
+  - id: clue_scorch_trail
+    content: 二楼西侧的焦痕从楼下台口一路爬上来，穿过雅座的栏杆，消失在尽头一扇木门旁边；当年火起时，有人是从这条路上去的阁楼。
+    unlocks: []
+  - id: clue_wall_scratches
+    content: 化妆间剥落的白灰下露出一行旧墨字，笔迹纤细，像女子的手笔：「……各自归途」。
+    unlocks: []
+  - id: clue_chest
+    content: 戏箱的行头叠得整整齐齐，唯独最底层空着一格，箱签上写着《子夜歌·归途》；灰尘的痕迹显示，那一格里的东西每夜都被取出，天亮前放回，箱角还蹭着阁楼板上才有的浮尘。
+    unlocks: []
+  - id: clue_burnt_page
+    content: 没落灰的木匣里是一页烧残的戏本，边缘焦黑，仅存的一行字被烟熏得发黄：「……各自归途，莫回头。」——正是《子夜歌》末折的最后一句。
+    unlocks: []
+  - id: clue_ash_letters
+    content: 井边的纸灰里翻出半页没烧尽的信，字迹枯瘦：「晚娘亲启：今年是第十三年。楼还在，戏还在。——守信」。灰堆里这样的纸角不止一片。
+    unlocks: []
+
+endings:
+  - id: ending_finish
+    scene: stage
+    condition: 在子时的戏台上促成《子夜歌·归途》唱到最后一句，送沈晚娘安然归去
+  - id: ending_farewell
+    scene: stage
+    condition: 让程守信与沈晚娘当面了结当年未竟的话（致歉、告别皆可），执念既解，不必唱完那折戏
+  - id: ending_ruin
+    scene: stage
+    condition: 在子时以毁本、强行断戏等强硬手段破坏仪式，而程守信的执念未解——当夜火痕旧处，戏楼再起事端（坏结局）
+  - id: ending_leave
+    scene: street
+    condition: 在天亮前不告而别、离开石桥街口——数日后听雨楼如期拆除，戏与人俱散
