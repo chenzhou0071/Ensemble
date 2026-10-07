@@ -54,9 +54,7 @@ export default function Room({ session, onLeave }: {
         <span className={`conn-badge ${state.connected ? "open" : ""}`}>
           {state.connected ? "已连接" : "连接中…"}
         </span>
-        <span className="turn-badge">
-          回合 {state.turnId} · ${state.costUsd.toFixed(3)}
-        </span>
+        <span className="turn-badge">回合 {state.turnId}</span>
         <button className="panel-toggle" aria-expanded={panelOpen}
                 onClick={() => setPanelOpen((open) => !open)}>手账</button>
       </header>
@@ -85,7 +83,7 @@ export default function Room({ session, onLeave }: {
                     npcNames={npcNames} />
           <CluePanel clues={state.clues} />
           <DiceLogPanel diceLog={state.diceLog} />
-          <CostPanel campaignId={session.campaignId} />
+          <CostPanel campaignId={session.campaignId} refreshKey={state.stateRev} />
         </aside>
       </main>
       <footer className="room-footer">

@@ -3,7 +3,9 @@ import { useEffect, useState } from "react";
 import { api } from "../api/rest";
 import type { UsageSummary } from "../types";
 
-export default function CostPanel({ campaignId }: { campaignId: string }) {
+export default function CostPanel({ campaignId, refreshKey = 0 }: {
+  campaignId: string; refreshKey?: number;
+}) {
   const [usage, setUsage] = useState<UsageSummary | null>(null);
 
   useEffect(() => {
@@ -12,7 +14,7 @@ export default function CostPanel({ campaignId }: { campaignId: string }) {
       .then((d) => { if (alive) setUsage(d); })
       .catch(() => {});                       // 拉取失败静默隐藏，不阻塞房间
     return () => { alive = false; };
-  }, [campaignId]);
+  }, [campaignId, refreshKey]);
 
   if (!usage) return null;
   const pct = usage.cap_usd > 0

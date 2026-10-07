@@ -23,6 +23,7 @@ export type GameState = {
   errorMessage: string | null;
   endingReached: string | null;
   costUsd: number;
+  stateRev: number;
 };
 
 export const initialState: GameState = {
@@ -42,6 +43,7 @@ export const initialState: GameState = {
   errorMessage: null,
   endingReached: null,
   costUsd: 0,
+  stateRev: 0,
 };
 
 export function reduceEvent(state: GameState, evt: WsEvent): GameState {
@@ -83,6 +85,7 @@ export function reduceEvent(state: GameState, evt: WsEvent): GameState {
         clues: p.clues_revealed,
         knownNpcs: p.known_npcs ?? state.knownNpcs,
         costUsd: p.cost_usd,
+        stateRev: state.stateRev + 1,
         endingReached: p.ending_reached ?? state.endingReached,
       };
       if (p.segments && p.segments.length > 0) {

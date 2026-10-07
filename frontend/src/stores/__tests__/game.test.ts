@@ -42,6 +42,19 @@ describe("reduceEvent", () => {
     expect(s.knownNpcs).toEqual(["elder"]);
   });
 
+  it("bumps stateRev on each authoritative state snapshot", () => {
+    let s = reduceEvent(initialState, evt("state", {
+      campaign_id: "c", branch_id: "b", turn_id: 1, scene_id: "square",
+      characters: [], clues_revealed: [], ending_reached: null, cost_usd: 0.01,
+    }));
+    expect(s.stateRev).toBe(1);
+    s = reduceEvent(s, evt("state", {
+      campaign_id: "c", branch_id: "b", turn_id: 2, scene_id: "square",
+      characters: [], clues_revealed: [], ending_reached: null, cost_usd: 0.02,
+    }));
+    expect(s.stateRev).toBe(2);
+  });
+
   it("queues dice for animation and logs them", () => {
     const dice = { actor: "pc_p1", skill: "侦查", skill_value: 50,
                    difficulty: "regular", roll: 12, level: "hard",

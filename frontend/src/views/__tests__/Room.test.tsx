@@ -73,6 +73,15 @@ describe("Room", () => {
     expect(screen.getByPlaceholderText("输入你的行动（回车提交）")).toBeEnabled();
   });
 
+  it("header badge shows only the turn number without cost", () => {
+    render(<Room session={SESSION} onLeave={() => {}} />);
+    act(() => handlers.onEvent!({ seq: 1, type: "turn", visibility: "all",
+                                  payload: { phase: "collecting", turn_id: 3 } }));
+    const badge = screen.getByText(/回合/);
+    expect(badge.textContent).toContain("回合 3");
+    expect(badge.textContent).not.toContain("$");
+  });
+
   it("shows story ending in narration without a popup overlay", () => {
     render(<Room session={SESSION} onLeave={() => {}} />);
     act(() => {

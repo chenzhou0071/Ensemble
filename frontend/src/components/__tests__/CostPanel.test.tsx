@@ -2,6 +2,7 @@ import { render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import CostPanel from "../CostPanel";
+import { api } from "../../api/rest";
 
 vi.mock("../../api/rest", () => ({
   api: {
@@ -20,5 +21,15 @@ describe("CostPanel", () => {
     render(<CostPanel campaignId="c1" />);
     expect(await screen.findByText(/\$0\.0005 \/ \$1\.00/)).toBeInTheDocument();
     expect(await screen.findByText(/gm · qwen3.8-flash/)).toBeInTheDocument();
+  });
+
+  it("refetches usage when refreshKey changes", async () => {
+    const mocked = vi.mocked(api.usage);
+    mocked.mockClear();
+    const { rerender } = render(<CostPanel campaignId="c1" refreshKey={0} />);
+    expect(await screen.findByText(/\$0\.0005 \/ \$1\.00/)).toBeInTheDocument();
+    expect(mocked).toHaveBeenCalledTimes(1);
+    rerender(<CostPanel campaignId="c1" refreshKey={1} />);
+    expect(mocked).toHaveBeenCalledTimes(2);
   });
 });
