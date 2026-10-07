@@ -2360,14 +2360,14 @@ def resolve_attack(actor: str, skill: str, attack_value: int,
                    seed: int, difficulty: CheckDifficulty = CheckDifficulty.REGULAR,
                    bonus: int = 0, penalty: int = 0) -> CombatOutcome:
     rng = random.Random(seed)          # 单一 seed 派生三条子流：可复现且互不干扰
-    # randbits 必须 < 2^63：seed 经 M5-7 落 dice 表（SQLite INTEGER 为有符号 64 位），
-    # randbits(64) 约半数 ≥ 2^63 会溢出（M2 同根因事故，勿改回）
-    attack = roll_check(actor, skill, attack_value, difficulty, rng.randbits(63),
+    # getrandbits 必须 < 2^63：seed 经 M5-7 落 dice 表（SQLite INTEGER 为有符号 64 位），
+    # getrandbits(64) 约半数 ≥ 2^63 会溢出（M2 同根因事故，勿改回）
+    attack = roll_check(actor, skill, attack_value, difficulty, rng.getrandbits(63),
                         bonus=bonus, penalty=penalty)
     defense = roll_check(defender, "闪避", defense_value, CheckDifficulty.REGULAR,
-                         rng.randbits(63))
+                         rng.getrandbits(63))
     hit = attack.success and not defense.success
-    damage = roll_damage(rng.randbits(63), damage_dice) if hit else 0
+    damage = roll_damage(rng.getrandbits(63), damage_dice) if hit else 0
     return CombatOutcome(attack=attack, defense=defense, hit=hit, damage=damage)
 ```
 
