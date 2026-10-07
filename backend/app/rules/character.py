@@ -9,8 +9,6 @@ class Character:
     player_id: str | None
     attributes: dict[str, int] = field(default_factory=dict)
     skills: dict[str, int] = field(default_factory=dict)
-    hp: int = 10
-    max_hp: int = 10
 
     def skill_value(self, skill: str) -> int:
         return self.skills.get(skill, self.attributes.get(skill, 0))
@@ -21,6 +19,5 @@ def make_default_character(player_id: str, name: str) -> Character:
     return Character(
         id=f"pc_{player_id}", name=name, player_id=player_id,
         attributes={"力量": 50, "敏捷": 55, "意志": 55, "智力": 60},
-        skills={"侦查": 50, "聆听": 45, "潜行": 40, "话术": 45, "图书馆使用": 40},
-        hp=10, max_hp=10,
+        skills={"侦查": 50, "聆听": 45, "潜行": 40, "话术": 45},
     )

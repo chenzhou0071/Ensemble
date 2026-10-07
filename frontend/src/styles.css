@@ -240,7 +240,6 @@ input:focus, select:focus {
 .char-card:last-child { border-bottom: none; }
 .char-name { font-weight: 700; letter-spacing: 0.04em; }
 .scene-name { font-weight: 700; letter-spacing: 0.04em; }
-.char-name .hp { color: var(--ok); font-weight: 400; margin-left: 8px; font-size: 13px; }
 
 /* ---- 手机抽屉开关：桌面隐藏，见文件末尾媒体查询 ---- */
 .panel-toggle, .side-close, .room-scrim { display: none; }
