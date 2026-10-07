@@ -1066,6 +1066,7 @@ def test_latency_window_capped_at_200():
 
 
 def test_reset_counters_isolates():
+    reset_counters()                       # 自包含：不依赖前置文件的全局计数残留
     get_counters().record_llm(ok=False)
     assert get_counters().snapshot()["llm"]["failures"] == 1
     reset_counters()
@@ -1132,7 +1133,7 @@ def test_drive_records_turn_latency_and_npc_count():
 from app.config import Pricing, PricingEntry, Settings
 from app.graph.nodes.gm import build_narrate_node, build_validate_node
 from app.graph.nodes.memory import build_memory_query_node
-from app.graph.nodes.npc import build_npc_worker
+from app.graph.npc import build_npc_worker
 from app.graph.nodes.turn import build_intake_node
 from app.llm.client import LLMClient
 from app.llm.fakes import FakeLLM
