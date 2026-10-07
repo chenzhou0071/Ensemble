@@ -93,6 +93,20 @@ def test_update_summaries_mirrors_new_summary(repo, campaign):
     assert graph.episodes[0]["body"] == summary.content
 
 
+def test_update_summaries_repeat_call_without_new_summary(repo, campaign):
+    """无新摘要时重复调用不炸：曾误用不存在的 SummaryRow.turn_id 触发 AttributeError。"""
+    graph = FakeGraphClient()
+    mem = GraphitiMemory(repo, graph_client=graph)
+    for i in range(12):
+        mem.write_event(campaign.id, campaign.active_branch_id,
+                        MemoryEvent(type="note", text=f"事件{i}", turn_id=i // 3))
+    graph.episodes.clear()
+    mem.update_summaries(campaign.id, campaign.active_branch_id, turn_id=3)
+    assert len(graph.episodes) == 1              # 首次生成摘要并镜像
+    mem.update_summaries(campaign.id, campaign.active_branch_id, turn_id=4)
+    assert len(graph.episodes) == 1              # 无新摘要 → 跳过镜像（不抛 AttributeError）
+
+
 def test_write_event_async_when_mirror_started(repo, campaign):
     """start 后镜像走后台线程：write_event 不阻塞主链，最终保序写入。"""
     import threading
@@ -154,6 +168,7 @@ def test_build_memory_uses_graphiti_backend(repo, monkeypatch):
 
 def _install_fake_graphiti(monkeypatch):
     """注入假 graphiti_core 模块树：零安装验证 DashScope 兼容接线。"""
+    import asyncio
     import sys
     import types
     from abc import ABC, abstractmethod
@@ -170,6 +185,11 @@ def _install_fake_graphiti(monkeypatch):
         def __init__(self, uri, user, password, **kwargs):
             assert isinstance(kwargs.get("cross_encoder"), FakeCrossEncoderClient), \
                 "cross_encoder 必须是 CrossEncoderClient 实例（pydantic 校验）"
+            try:
+                # 记录构造时是否处于事件循环内（真 graphiti 会把建索引任务调度到该 loop）
+                self.created_loop = asyncio.get_running_loop()
+            except RuntimeError:
+                self.created_loop = None
             calls["graphiti"] = {"uri": uri, "user": user, "password": password, **kwargs}
 
         async def build_indices_and_constraints(self):
@@ -241,6 +261,19 @@ def test_make_graphiti_client_wires_dashscope_compatible_clients(monkeypatch):
 
     client.close()
     assert calls["closed"] is True
+
+
+def test_graphiti_constructed_inside_bridge_loop(monkeypatch):
+    """Graphiti 必须在专用桥接循环内构造：其驱动会把建索引任务调度到构造时的 running loop，
+    若在外部循环（如 uvicorn 主循环）构造，driver 会被两个事件循环混用。"""
+    from app.memory.graphiti import make_graphiti_client
+
+    _install_fake_graphiti(monkeypatch)
+    settings = Settings(neo4j_password="pw-12345678", qwen_api_key="sk-dashscope",
+                        neo4j_uri="bolt://neo4j:7687")
+    client = make_graphiti_client(settings)
+    assert client._graphiti.created_loop is client._loop
+    client.close()
 
 
 def test_make_graphiti_client_requires_neo4j_password():

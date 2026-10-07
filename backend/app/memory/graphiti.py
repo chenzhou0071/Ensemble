@@ -125,7 +125,7 @@ class GraphitiMemory:
             return
         after = self._repo.latest_summary(campaign_id, branch_id)
         if after is None or (before is not None and after.content == before.content
-                             and after.turn_id == before.turn_id):
+                             and after.upto_turn == before.upto_turn):
             return                                   # 未产生新摘要
         self._mirror.submit((f"summary:t{turn_id}", after.content,
                              self._group_id(campaign_id, branch_id),
@@ -140,16 +140,23 @@ class NoopCrossEncoder:
 
 
 class _GraphitiAdapter:
-    """graphiti-core 异步 API → 同步 GraphClient（后台 daemon 线程独占事件循环）。"""
+    """graphiti-core 异步 API → 同步 GraphClient（后台 daemon 线程独占事件循环）。
+
+    构造也必须在专用循环内执行：graphiti 驱动会把"建索引"任务调度到构造时的 running loop，
+    若在外部循环（如 uvicorn 主循环）构造，driver 会被两个事件循环混用。
+    """
 
     EPISODE_TIMEOUT = 300      # add_episode 含多轮 LLM 抽取，真机实测远超默认 60s
 
-    def __init__(self, graphiti, timeout_seconds: int = 60):
-        self._graphiti = graphiti
+    def __init__(self, factory: Callable[[], Any], timeout_seconds: int = 60):
         self._timeout = timeout_seconds
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(target=self._serve_loop, daemon=True)
         self._thread.start()
+        self._graphiti = self._call(self._construct(factory))
+
+    async def _construct(self, factory: Callable[[], Any]):
+        return factory()
 
     def _serve_loop(self) -> None:
         asyncio.set_event_loop(self._loop)
@@ -202,18 +209,21 @@ def make_graphiti_client(settings) -> GraphClient:
     class _BoundNoopCrossEncoder(NoopCrossEncoder, CrossEncoderClient):
         """绑定 graphiti 的 ABC：GraphitiClients 是 pydantic 模型，对 cross_encoder 做实例校验。"""
 
-    llm_config = LLMConfig(api_key=settings.qwen_api_key, base_url=settings.qwen_base_url,
-                           model=settings.gm_model, small_model=settings.cheap_model)
-    graphiti = Graphiti(
-        settings.neo4j_uri, settings.neo4j_user, settings.neo4j_password,
-        # 默认 json_schema 约束解码：DashScope 支持（含 $defs/$ref，实测通过），字段名由服务端强制
-        llm_client=OpenAIGenericClient(config=llm_config),
-        embedder=OpenAIEmbedder(config=OpenAIEmbedderConfig(
-            api_key=settings.qwen_api_key, base_url=settings.qwen_base_url,
-            embedding_model="text-embedding-v4")),
-        cross_encoder=_BoundNoopCrossEncoder(),
-    )
-    adapter = _GraphitiAdapter(graphiti)
+    def build_graphiti() -> Any:
+        """实例化 Graphiti（由 _GraphitiAdapter 在专用循环内调用，避免 driver 跨循环混用）。"""
+        llm_config = LLMConfig(api_key=settings.qwen_api_key, base_url=settings.qwen_base_url,
+                               model=settings.gm_model, small_model=settings.cheap_model)
+        return Graphiti(
+            settings.neo4j_uri, settings.neo4j_user, settings.neo4j_password,
+            # 默认 json_schema 约束解码：DashScope 支持（含 $defs/$ref，实测通过），字段名由服务端强制
+            llm_client=OpenAIGenericClient(config=llm_config),
+            embedder=OpenAIEmbedder(config=OpenAIEmbedderConfig(
+                api_key=settings.qwen_api_key, base_url=settings.qwen_base_url,
+                embedding_model="text-embedding-v4")),
+            cross_encoder=_BoundNoopCrossEncoder(),
+        )
+
+    adapter = _GraphitiAdapter(build_graphiti)
     adapter.build_indices()      # 首次连库建索引（幂等）；失败交由 build_memory 回退
     return adapter
 
