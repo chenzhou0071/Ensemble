@@ -60,6 +60,10 @@ npcs:
     persona: 栖身地窖的存在，用多重叠音说话，自称是「守约者」，试图与来者做一笔关于记忆的交易。
     knowledge: [镇子的旧约, 神像的秘密]
     initial_attitude: 50
+    combat:
+      defense: 45
+      damage: "1d6"
+      hp: 12
 
 clues:
   - id: clue_missing

@@ -1,4 +1,8 @@
 import pytest
+from copy import deepcopy
+
+from pydantic import ValidationError
+
 from app.content.schema import Module
 
 MINIMAL = {
@@ -31,3 +35,20 @@ def test_lookup_missing_raises_key_error():
         m.npc("nowhere")
     with pytest.raises(KeyError):
         m.ending("nowhere")
+
+
+def test_npc_combat_optional_and_parsed():
+    m = Module.model_validate(MINIMAL)
+    assert m.npc("guard").combat is None                     # 无战斗块：不可被攻击
+    data = deepcopy(MINIMAL)
+    data["npcs"][0]["combat"] = {"defense": 45, "damage": "1d6", "hp": 12}
+    m2 = Module.model_validate(data)
+    assert m2.npc("guard").combat.hp == 12
+    assert m2.npc("guard").combat.defense == 45
+
+
+def test_npc_combat_rejects_bad_damage_expression():
+    data = deepcopy(MINIMAL)
+    data["npcs"][0]["combat"] = {"damage": "1d6-2"}
+    with pytest.raises(ValidationError):
+        Module.model_validate(data)

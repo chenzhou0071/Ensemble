@@ -1,5 +1,7 @@
 """模组内容模型：内容与引擎分离，字段即公开契约。"""
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+from app.rules.combat import parse_damage_dice
 
 
 class ModuleMeta(BaseModel):
@@ -25,12 +27,25 @@ class Scene(BaseModel):
     clues: list[str] = Field(default_factory=list)
 
 
+class NpcCombat(BaseModel):
+    defense: int = Field(default=40, ge=1, le=100)   # 防御（闪避）技能值
+    damage: str = "1d4"                              # 伤害骰表达式（NdM+K）
+    hp: int = Field(default=8, ge=1)
+
+    @field_validator("damage")
+    @classmethod
+    def _damage_must_parse(cls, v: str) -> str:
+        parse_damage_dice(v)
+        return v
+
+
 class NpcDef(BaseModel):
     id: str
     name: str
     persona: str
     knowledge: list[str] = Field(default_factory=list)
     initial_attitude: int = 50
+    combat: NpcCombat | None = None      # 存在即可被攻击（M5-7）；缺省 NPC 不可被攻击
 
 
 class Clue(BaseModel):
