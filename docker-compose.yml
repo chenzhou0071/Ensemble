@@ -4,10 +4,17 @@ services:
     environment:
       DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      ENSEMBLE_MEMORY_BACKEND: ${ENSEMBLE_MEMORY_BACKEND:-journal}
+      NEO4J_URI: bolt://neo4j:7687
+      NEO4J_USER: ${NEO4J_USER:-neo4j}
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD:-}
     volumes:
       - ./data:/data
       - ./modules:/modules:ro
       - ./config:/config:ro
+    depends_on:
+      neo4j:
+        condition: service_healthy
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz').read()"]
@@ -15,6 +22,26 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
+
+  neo4j:
+    image: neo4j:5.26-community
+    environment:
+      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:?NEO4J_PASSWORD is required in .env}
+      NEO4J_server_memory_heap_initial__size: 512m
+      NEO4J_server_memory_heap_max__size: 1g
+      NEO4J_server_memory_pagecache_size: 512m
+    volumes:
+      - ./data/neo4j:/data
+    ports:
+      - "7474:7474"    # Neo4j Browser（查看图谱）
+      - "7687:7687"    # Bolt（本地 dev 后端可直连）
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "cypher-shell -u neo4j -p \"$${NEO4J_AUTH#*/}\" 'RETURN 1' || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 40s
 
   frontend:
     build: ./frontend
