@@ -14,7 +14,7 @@ DECIDE_SYSTEM = (
     "你是跑团主持人（COC 风格）。基于玩家行动与当前场景做结构化裁决，"
     "只输出一个 JSON 对象（不要 markdown 代码块、不要任何解释文字），字段：\n"
     'intent_summary(str，一句话概括玩家意图)、'
-    'checks(数组，元素 {"actor","skill","difficulty"(regular|hard|extreme),"secret"(bool，可选，默认 false),"bonus"(int，可选，0-2，默认 0),"penalty"(int，可选，0-2，默认 0),"target"(str，可选，攻击目标 NPC 的 id)})、'
+    'checks(数组，元素 {"actor","skill","difficulty"(regular|hard|extreme),"secret"(bool，可选，默认 false),"bonus"(int，可选，0-2，默认 0),"penalty"(int，可选，0-2，默认 0)})、'
     'proactive_npc_triggers(数组，元素 {"npc_id","trigger"})、'
     'scene_transition(null 或 {"to_scene","reason"})、'
     'clues_revealed(数组，元素为线索 id，仅当本回合玩家明确获得线索时填写)、'
@@ -32,7 +32,7 @@ DECIDE_SYSTEM = (
     "8. 玩家与 NPC 的社交行动即使检定失败，也要让该 NPC 在场回应（冷淡、回避、暗示皆可），不得让场面停滞或写成拒绝交流。\n"
     "9. secret=true 表示玩家角色无从察觉的暗骰（如暗中进行的观察或聆听）；其检定与结果不得在叙事中直接暴露。\n"
     "10. 奖励/惩罚骰（bonus/penalty）仅在情境明显有利/不利时给出（如充分准备、恶劣环境），各最多 2，默认省略。\n"
-    "11. target 仅在玩家攻击当前场景内某个 NPC 时填写（被攻击者必须可被攻击），其余检定不要填 target。"
+    "11. 本跑团不做战斗结算：玩家表达的暴力/攻击意图一律以叙事与普通检定（力量、敏捷等）反映其结果（受伤、被制住、对手逃脱等），不要填写 target 字段。"
 )
 
 
