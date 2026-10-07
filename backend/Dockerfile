@@ -14,10 +14,10 @@ ENV UV_DEFAULT_INDEX=${UV_DEFAULT_INDEX:-https://pypi.org/simple}
 
 # 依赖层缓存：先只装依赖，再拷源码装项目（改代码不重装依赖）
 COPY pyproject.toml uv.lock ./
-RUN uv sync --frozen --no-dev --extra graph --no-install-project
+RUN uv sync --frozen --no-dev --no-install-project
 
 COPY app ./app
-RUN uv sync --frozen --no-dev --extra graph
+RUN uv sync --frozen --no-dev
 
 ENV PATH="/srv/.venv/bin:$PATH" \
     ENSEMBLE_SQLITE_PATH=/data/ensemble.db \
