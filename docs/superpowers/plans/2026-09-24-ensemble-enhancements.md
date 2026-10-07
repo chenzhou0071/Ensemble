@@ -67,7 +67,7 @@ backend/
     ├── graph/test_fallbacks_count.py  # M5-3（新建）
     ├── api/test_usage_api.py      # M5-5（新建）
     ├── rules/test_combat.py       # M5-6（新建）
-    ├── graph/test_combat.py       # M5-7（新建）
+    ├── graph/test_combat_flow.py  # M5-7（新建）
     └── （追加）rules/test_dice.py、rules/test_check.py、storage/test_migration.py、
          graph/test_resolve_checks.py、graph/test_endings.py（validate 新签名兼容）、
          tests/content/test_schema.py
@@ -2472,7 +2472,7 @@ git commit -m "feat(rules): lightweight combat resolution and npc combat stats i
 - Modify: `backend/app/graph/nodes/turn.py`（intake 装载 npc_hp / wait_input、fallback 清空两键 / resolve_checks 过滤 target / post_turn 快照加 npc_hp / 新增 `_combat_roll_row` + `build_combat_resolve_node`）
 - Modify: `backend/app/graph/nodes/gm.py`（validate 增加 `_normalize_targets` / 新增 `_combat_lines` / narrate 提示词条件插入战斗块 / `DECIDE_SYSTEM` 加 target 说明）
 - Modify: `backend/app/graph/main.py`（import、`_route_after_validate` 三分支、新增 `_route_after_combat`、装配 `combat_resolve` 节点与边）
-- Test: `backend/tests/graph/test_combat.py`（新建）、`backend/tests/graph/test_endings.py`（追加 1 例）
+- Test: `backend/tests/graph/test_combat_flow.py`（新建；**执行期更名**：原名 test_combat.py 与 `tests/rules/test_combat.py` 同名，同会话收集触发 pytest basename 冲突，故改为 test_combat_flow.py）、`backend/tests/graph/test_endings.py`（追加 1 例）
 
 **Interfaces:**
 - Consumes: `resolve_attack / CombatOutcome`（M5-6）、`_resolve_plain_check`（M5-4）、`bonus_note`（M5-4）、`build_validate_node(client, module)` 循环版（M3-4）、`_guarded` / `_skill_value` / `new_seed` / `add_dice_record(..., secret=False, bonus=0, penalty=0)`（M2 / M4-2 / M5-4）、`get_counters().record_fallback`（M5-3）
@@ -2489,9 +2489,9 @@ git commit -m "feat(rules): lightweight combat resolution and npc combat stats i
   - `combat` 事件仅落 L2（不在 WS 推送白名单，玩家经 dice 行 + 叙事感知；与 M4 的 gm-only 事件同策略）
   - 无 target 时全链路行为与 M5-6 之前逐字符/逐分支一致（提示词不出现"战斗结算"）
 
-- [ ] **Step 1: 写失败测试（test_combat.py 新建 + test_endings.py 追加）**
+- [ ] **Step 1: 写失败测试（test_combat_flow.py 新建 + test_endings.py 追加）**
 
-`backend/tests/graph/test_combat.py`：
+`backend/tests/graph/test_combat_flow.py`：
 ```python
 import json
 
@@ -2743,8 +2743,8 @@ def test_validate_keeps_target_without_scene(campaign):
 
 - [ ] **Step 2: 验证失败**
 
-Run: `cd backend; uv run pytest tests/graph/test_combat.py tests/graph/test_endings.py -q`
-Expected: FAIL —— test_combat.py 收集期 `ImportError: cannot import name 'build_combat_resolve_node' from 'app.graph.nodes.turn'`；test_endings 追加用例 `KeyError: 'target'`（CheckRequest 尚无该字段）
+Run: `cd backend; uv run pytest tests/graph/test_combat_flow.py tests/graph/test_endings.py -q`
+Expected: FAIL —— test_combat_flow.py 收集期 `ImportError: cannot import name 'build_combat_resolve_node' from 'app.graph.nodes.turn'`；test_endings 追加用例 `KeyError: 'target'`（CheckRequest 尚无该字段）
 
 - [ ] **Step 3: 实现状态与契约（state / schemas）**
 
@@ -2856,11 +2856,10 @@ def build_resolve_checks_node(repo):
     return resolve_checks
 ```
 
-6. `build_post_turn_node` 的 `repo.append_state(...)` 调用替换为（快照持久化 npc_hp）：
+6. `build_post_turn_node` 的 `repo.append_state(...)` 调用替换为（快照持久化 npc_hp；**`npc_attitudes` 必须用本地变量 `attitudes`（经 apply_attitude_deltas 更新后的值），不得改成 `state.get("npc_attitudes")`——纯函数返回新 dict，state 里仍是旧值，会导致 M3-4A 好感度更新丢失**）：
 ```python
         repo.append_state(campaign_id, branch_id, turn_id,
-                          {"scene_id": state.get("scene_id"),
-                           "npc_attitudes": state.get("npc_attitudes", {}),
+                          {"scene_id": new_scene, "npc_attitudes": attitudes,
                            "npc_hp": state.get("npc_hp") or {}})
 ```
 
@@ -3119,8 +3118,8 @@ def _route_after_combat(state: GameState) -> str:
 
 - [ ] **Step 7: 定向验证（战斗 + 图回归）**
 
-Run: `cd backend; uv run pytest tests/graph/test_combat.py tests/graph/test_endings.py -q`
-Expected: PASS —— test_combat.py 10 例全绿（含图级路由与 HP 快照用例）+ test_endings 既有用例与新增 `test_validate_keeps_target_without_scene` 全绿
+Run: `cd backend; uv run pytest tests/graph/test_combat_flow.py tests/graph/test_endings.py -q`
+Expected: PASS —— test_combat_flow.py 10 例全绿（含图级路由与 HP 快照用例）+ test_endings 既有用例与新增 `test_validate_keeps_target_without_scene` 全绿
 
 Run: `cd backend; uv run pytest tests/graph tests/rules -q`
 Expected: PASS —— 零回归（重点确认 test_resolve_checks / test_gm_decide / test_gm_narrate / test_replay_smoke 不受 validate 三分支与 narrate 条件块影响）
@@ -3133,7 +3132,7 @@ Expected: PASS —— 后端全量绿（含 M2 回放冒烟；test_replay_smoke 
 - [ ] **Step 9: Commit**
 
 ```bash
-git add backend/app/graph/state.py backend/app/graph/schemas.py backend/app/graph/nodes/turn.py backend/app/graph/nodes/gm.py backend/app/graph/main.py backend/tests/graph/test_combat.py backend/tests/graph/test_endings.py
+git add backend/app/graph/state.py backend/app/graph/schemas.py backend/app/graph/nodes/turn.py backend/app/graph/nodes/gm.py backend/app/graph/main.py backend/tests/graph/test_combat_flow.py backend/tests/graph/test_endings.py
 git commit -m "feat(graph): combat resolution node with target routing and npc hp snapshot"
 ```
 
@@ -3161,7 +3160,7 @@ git commit -m "feat(graph): combat resolution node with target routing and npc h
 - 可选依赖（graphiti-core / langsmith）未安装时全部走回退路径，M5 验收不要求安装（相关测试均以注入替身/延迟导入路径验证）。
 
 **类型一致性抽查**：
-- `combat_log` 条目形状 `{npc_id, name, hit, damage, hp_before, hp_after, attack, defense}` 四处一致：M5-7 节点产出、test_combat 断言、`_combat_lines` 读取、`combat` 事件 payload（`**entry` + `text`）。
+- `combat_log` 条目形状 `{npc_id, name, hit, damage, hp_before, hp_after, attack, defense}` 四处一致：M5-7 节点产出、test_combat_flow 断言、`_combat_lines` 读取、`combat` 事件 payload（`**entry` + `text`）。
 - 掷骰行 `_combat_roll_row` 与 `check_results` 行同构（`actor/skill/roll/skill_value/level/success/bonus/penalty`）：测试以 `entry["attack"]["level"] == "hard"`（StrEnum JSON 序列化）与 `rows[0].seed == 777` 双重锚定。
 - `npc_hp` 五处一致：`GameState.npc_hp` → intake 重建（`snap.get("npc_hp") or {n.id: n.combat.hp ...}`）→ combat_resolve 写回 → post_turn `append_state` 持久化 → wait_input / fallback 清空（失败不推进语义）。
 - `CheckRequest.target` 三层一致：M5-7 schemas 定义 → validate `_normalize_targets` 就地降级 → `_route_after_validate` 分流键与 combat_resolve 过滤条件同源（`chk.get("target")`）。
