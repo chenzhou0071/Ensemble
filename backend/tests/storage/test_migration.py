@@ -5,6 +5,7 @@ from sqlmodel import Session
 
 from app.storage.db import init_db, make_engine
 from app.storage.models import Campaign, DiceRecordRow
+from app.storage.repo import SqliteRepository
 
 
 def test_init_db_migrates_legacy_dice_record_table(tmp_path):
@@ -60,3 +61,43 @@ def test_init_db_migrates_legacy_campaign_owner_column(tmp_path):
     with Session(engine) as s:
         row = s.get(Campaign, "c1")
         assert row is not None and row.owner_client_id == ""   # 历史行补列为默认空
+
+
+def test_init_db_backfills_bonus_penalty_on_legacy_table(tmp_path):
+    db = tmp_path / "legacy_bonus.db"
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "CREATE TABLE dicerecordrow ("
+        "id INTEGER NOT NULL PRIMARY KEY, campaign_id VARCHAR NOT NULL,"
+        "branch_id VARCHAR NOT NULL, turn_id INTEGER NOT NULL, actor VARCHAR NOT NULL,"
+        "skill VARCHAR NOT NULL, skill_value INTEGER NOT NULL,"
+        "difficulty VARCHAR NOT NULL, roll INTEGER NOT NULL, level VARCHAR NOT NULL,"
+        "seed INTEGER NOT NULL, created_at DATETIME NOT NULL)")
+    conn.execute("INSERT INTO dicerecordrow VALUES "
+                 "(1, 'c1', 'c1@main', 1, 'pc_1', '侦查', 50, 'regular', 30, 'regular',"
+                 " 1, '2026-01-01 00:00:00')")
+    conn.commit()
+    conn.close()
+
+    engine = make_engine(str(db))
+    init_db(engine)
+
+    with engine.begin() as conn:
+        cols = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(dicerecordrow)")}
+    assert {"bonus", "penalty"} <= cols
+    repo = SqliteRepository(engine)
+    old = repo.list_dice_records("c1", "c1@main")
+    assert old[0].bonus == 0 and old[0].penalty == 0          # 旧数据补默认 0
+    repo.add_dice_record("c1", "c1@main", 2, "pc_1", "潜行", 40, "regular", 20,
+                         "hard", 9, bonus=1, penalty=0)
+    assert repo.list_dice_records("c1", "c1@main")[1].bonus == 1
+
+
+def test_init_db_is_idempotent_on_fresh_engine(tmp_path):
+    engine = make_engine(str(tmp_path / "fresh_bonus.db"))
+    init_db(engine)
+    init_db(engine)                                           # 二次调用幂等
+    repo = SqliteRepository(engine)
+    repo.add_dice_record("c1", "c1@main", 1, "pc_1", "侦查", 50, "regular", 30,
+                         "regular", 1, bonus=0, penalty=2)
+    assert repo.list_dice_records("c1", "c1@main")[0].penalty == 2

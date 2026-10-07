@@ -1,4 +1,4 @@
-from app.rules.dice import new_seed, roll_d100
+from app.rules.dice import new_seed, roll_d100, roll_d100_with_bonus
 
 def test_roll_is_deterministic_for_same_seed():
     assert roll_d100(42) == roll_d100(42)
@@ -14,3 +14,22 @@ def test_new_seed_fits_sqlite_integer():
 
 def test_new_seed_varies():
     assert new_seed() != new_seed()
+
+
+def test_zero_net_matches_plain_roll():
+    for s in (1, 2, 3, 99):
+        assert roll_d100_with_bonus(s) == roll_d100(s)
+        assert roll_d100_with_bonus(s, 2, 2) == roll_d100(s)      # net 抵销
+
+def test_bonus_not_worse_penalty_not_better():
+    for s in range(50):
+        assert roll_d100_with_bonus(s, 1) <= roll_d100(s)          # 奖励取最小 ≥ 不劣于原掷
+        assert roll_d100_with_bonus(s, 0, 1) >= roll_d100(s)       # 惩罚取最大 ≥ 不优于原掷
+
+def test_net_clamped_to_two():
+    for s in range(20):
+        assert roll_d100_with_bonus(s, 9, 0) == roll_d100_with_bonus(s, 2, 0)
+        assert roll_d100_with_bonus(s, 0, 9) == roll_d100_with_bonus(s, 0, 2)
+
+def test_bonus_result_in_range():
+    assert all(1 <= roll_d100_with_bonus(s, 2, 0) <= 100 for s in range(200))

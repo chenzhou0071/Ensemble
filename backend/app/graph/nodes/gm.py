@@ -8,12 +8,13 @@ from app.graph.schemas import parse_decision_json
 from app.graph.state import GameState
 from app.llm.client import ChatMessage, LLMClient, LlmContext
 from app.obs.counters import get_counters
+from app.rules.check import bonus_note
 
 DECIDE_SYSTEM = (
     "你是跑团主持人（COC 风格）。基于玩家行动与当前场景做结构化裁决，"
     "只输出一个 JSON 对象（不要 markdown 代码块、不要任何解释文字），字段：\n"
     'intent_summary(str，一句话概括玩家意图)、'
-    'checks(数组，元素 {"actor","skill","difficulty"(regular|hard|extreme),"secret"(bool，可选，默认 false)})、'
+    'checks(数组，元素 {"actor","skill","difficulty"(regular|hard|extreme),"secret"(bool，可选，默认 false),"bonus"(int，可选，0-2，默认 0),"penalty"(int，可选，0-2，默认 0)})、'
     'proactive_npc_triggers(数组，元素 {"npc_id","trigger"})、'
     'scene_transition(null 或 {"to_scene","reason"})、'
     'clues_revealed(数组，元素为线索 id，仅当本回合玩家明确获得线索时填写)、'
@@ -29,7 +30,8 @@ DECIDE_SYSTEM = (
     "6. memory_queries 为 0~3 个简短检索词，仅在需要回忆前情时给出\n"
     "7. 开场回合可以引入场面与 NPC，但不要要求检定；\n"
     "8. 玩家与 NPC 的社交行动即使检定失败，也要让该 NPC 在场回应（冷淡、回避、暗示皆可），不得让场面停滞或写成拒绝交流。\n"
-    "9. secret=true 表示玩家角色无从察觉的暗骰（如暗中进行的观察或聆听）；其检定与结果不得在叙事中直接暴露。"
+    "9. secret=true 表示玩家角色无从察觉的暗骰（如暗中进行的观察或聆听）；其检定与结果不得在叙事中直接暴露。\n"
+    "10. 奖励/惩罚骰（bonus/penalty）仅在情境明显有利/不利时给出（如充分准备、恶劣环境），各最多 2，默认省略。"
 )
 
 
@@ -199,10 +201,11 @@ def _check_lines(state: GameState) -> str:
     lines = []
     for c in state.get("check_results", []):
         verdict = "成功" if c.get("success") else "失败"
+        dice_note = bonus_note(int(c.get("bonus", 0)), int(c.get("penalty", 0)))
         note = ("（暗骰：不得在叙事中直接暴露该检定与结果，只可化为隐约的线索或不安感）"
                 if c.get("secret") else "")
         lines.append(f"- {_char_name(state, c.get('actor'))}的「{c['skill']}」："
-                     f"{c['roll']}/{c['skill_value']} → {c['level']}（{verdict}）{note}")
+                     f"{c['roll']}/{c['skill_value']} {dice_note}→ {c['level']}（{verdict}）{note}")
     return "\n".join(lines) or "（本回合无检定）"
 
 

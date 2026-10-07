@@ -12,6 +12,8 @@ export default function DiceLogPanel({ diceLog }: { diceLog: DicePayload[] }) {
             {rows.map((d, i) => (
               <li key={i} className={d.success ? "ok" : "bad"}>
                 {d.skill} d100={d.roll} · {d.level}
+                {d.bonus ? ` · 奖励骰×${d.bonus}` : ""}
+                {d.penalty ? ` · 惩罚骰×${d.penalty}` : ""}
               </li>
             ))}
           </ul>

@@ -2,7 +2,7 @@
 from dataclasses import dataclass
 from enum import StrEnum
 
-from app.rules.dice import roll_d100
+from app.rules.dice import roll_d100, roll_d100_with_bonus
 
 
 class CheckDifficulty(StrEnum):
@@ -35,6 +35,8 @@ class CheckResult:
     seed: int
     level: SuccessLevel
     success: bool
+    bonus: int = 0
+    penalty: int = 0
 
 
 def _level_for(roll: int, skill_value: int) -> SuccessLevel:
@@ -52,8 +54,13 @@ def _level_for(roll: int, skill_value: int) -> SuccessLevel:
 
 
 def roll_check(actor: str, skill: str, skill_value: int,
-               difficulty: CheckDifficulty, seed: int) -> CheckResult:
-    roll = roll_d100(seed)
+               difficulty: CheckDifficulty, seed: int,
+               bonus: int = 0, penalty: int = 0) -> CheckResult:
+    net = max(-2, min(2, int(bonus) - int(penalty)))
+    if net == 0:
+        roll = roll_d100(seed)              # 与既有行为完全一致（保留 monkeypatch 语义）
+    else:
+        roll = roll_d100_with_bonus(seed, bonus, penalty)
     level = _level_for(roll, skill_value)
     if level is SuccessLevel.CRITICAL:
         success = True
@@ -61,4 +68,15 @@ def roll_check(actor: str, skill: str, skill_value: int,
         success = False
     else:
         success = _RANK[level] >= _REQUIRED[difficulty]
-    return CheckResult(actor, skill, skill_value, difficulty, roll, seed, level, success)
+    return CheckResult(actor, skill, skill_value, difficulty, roll, seed, level, success,
+                       bonus=max(net, 0), penalty=max(-net, 0))
+
+
+def bonus_note(bonus: int, penalty: int) -> str:
+    """展示用标注：'（奖励骰 ×1） ' / ''；事件文本、提示词行、前端文案同构。"""
+    parts = []
+    if bonus:
+        parts.append(f"奖励骰 ×{bonus}")
+    if penalty:
+        parts.append(f"惩罚骰 ×{penalty}")
+    return f"（{'，'.join(parts)}） " if parts else ""

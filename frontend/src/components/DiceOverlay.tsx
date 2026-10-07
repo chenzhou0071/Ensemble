@@ -42,6 +42,13 @@ export default function DiceOverlay({ dice, onDone }: {
         </div>
         <div className={rollClass}>{display}</div>
         <div className="dice-level">{revealed ? LEVEL_LABEL[dice.level] ?? dice.level : "……"}</div>
+        {(dice.bonus || dice.penalty) ? (
+          <div className="dice-note">
+            {dice.bonus ? `奖励骰 ×${dice.bonus}` : ""}
+            {dice.bonus && dice.penalty ? "，" : ""}
+            {dice.penalty ? `惩罚骰 ×${dice.penalty}` : ""}
+          </div>
+        ) : null}
       </div>
     </div>
   );

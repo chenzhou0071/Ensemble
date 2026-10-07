@@ -8,7 +8,7 @@ from app.graph.state import GameState
 from app.memory.base import MemoryEvent
 from app.obs.counters import get_counters
 from app.rules.attitude import apply_attitude_deltas
-from app.rules.check import CheckDifficulty, roll_check
+from app.rules.check import CheckDifficulty, bonus_note, roll_check
 from app.rules.dice import new_seed
 
 
@@ -69,45 +69,53 @@ def _skill_value(state: GameState, character_id: str, skill: str) -> int:
     return char.get("skills", {}).get(skill, char.get("attributes", {}).get(skill, 0))
 
 
+def _resolve_plain_check(repo, state: GameState, chk: dict) -> dict:
+    """单条普通检定（M5-4 自 resolve_checks 提取）：掷骰 → DiceRecord → 实时推送 → check 事件 → 结果行。"""
+    campaign_id, branch_id, turn_id = state["campaign_id"], state["branch_id"], state["turn_id"]
+    actor, skill = chk["actor"], chk["skill"]
+    secret = bool(chk.get("secret"))
+    skill_value = _skill_value(state, actor, skill)
+    seed = new_seed()
+    r = roll_check(actor, skill, skill_value,
+                   CheckDifficulty(chk.get("difficulty", "regular")), seed,
+                   bonus=int(chk.get("bonus", 0)), penalty=int(chk.get("penalty", 0)))
+    rid = repo.add_dice_record(campaign_id, branch_id, turn_id, r.actor, r.skill,
+                               r.skill_value, str(r.difficulty), r.roll, str(r.level),
+                               r.seed, secret=secret, bonus=r.bonus, penalty=r.penalty)
+    # 骰子先出（M3-11 既有）：明骰掷后立即经流式通道推送（先于叙事 token；收口快照按 id 去重兜底）；
+    # 暗骰不进实时流——流式通道无法按订阅者过滤，其可见性由收口快照统一兜底。
+    # stream_writer() 为 contextvar 机制（无参），提取到独立函数后照常可用；
+    # payload 追加 bonus/penalty：否则实时 DiceOverlay 与日志缺奖惩标注（收口按 id 去重不会补推）
+    if not secret:
+        writer = stream_writer()
+        writer({"dice": {"id": rid, "actor": r.actor, "skill": r.skill,
+                         "skill_value": r.skill_value, "difficulty": str(r.difficulty),
+                         "roll": r.roll, "level": str(r.level),
+                         "success": r.success, "seed": r.seed,
+                         "bonus": r.bonus, "penalty": r.penalty}})
+    verdict = "成功" if r.success else "失败"
+    note = bonus_note(r.bonus, r.penalty)
+    repo.add_event(campaign_id, branch_id, turn_id, type="check",
+                   payload={"text": f"{actor} 的「{skill}」检定：{r.roll}/{r.skill_value} "
+                                    f"{note}→ {r.level}（{verdict}）",
+                            "roll": r.roll, "level": str(r.level), "success": r.success,
+                            "secret": secret, "bonus": r.bonus, "penalty": r.penalty},
+                   visibility="gm" if secret else "all")
+    return {"actor": r.actor, "skill": r.skill, "roll": r.roll,
+            "skill_value": r.skill_value, "level": str(r.level),
+            "success": r.success, "seed": r.seed,
+            "difficulty": str(r.difficulty), "secret": secret,
+            "bonus": r.bonus, "penalty": r.penalty}
+
+
 def build_resolve_checks_node(repo):
     def resolve_checks(state: GameState) -> dict:
-        campaign_id, branch_id, turn_id = state["campaign_id"], state["branch_id"], state["turn_id"]
         checks = (state.get("decision") or {}).get("checks", [])
-        writer = stream_writer()
-        results = []
-        for chk in checks:
-            actor, skill = chk["actor"], chk["skill"]
-            secret = bool(chk.get("secret"))
-            skill_value = _skill_value(state, actor, skill)
-            seed = new_seed()
-            r = roll_check(actor, skill, skill_value,
-                           CheckDifficulty(chk.get("difficulty", "regular")), seed)
-            rid = repo.add_dice_record(campaign_id, branch_id, turn_id, r.actor, r.skill,
-                                       r.skill_value, str(r.difficulty), r.roll, str(r.level),
-                                       r.seed, secret=secret)
-            # 骰子先出：明骰掷后立即经流式通道推送（先于叙事 token；收口快照按 id 去重兜底）；
-            # 暗骰不进实时流——流式通道无法按订阅者过滤，其可见性由收口快照统一兜底
-            if not secret:
-                writer({"dice": {"id": rid, "actor": r.actor, "skill": r.skill,
-                                 "skill_value": r.skill_value, "difficulty": str(r.difficulty),
-                                 "roll": r.roll, "level": str(r.level),
-                                 "success": r.success, "seed": r.seed}})
-            verdict = "成功" if r.success else "失败"
-            repo.add_event(campaign_id, branch_id, turn_id, type="check",
-                           payload={"text": f"{actor} 的「{skill}」检定：{r.roll}/{r.skill_value} "
-                                            f"→ {r.level}（{verdict}）",
-                                    "roll": r.roll, "level": str(r.level), "success": r.success,
-                                    "secret": secret},
-                           visibility="gm" if secret else "all")
-            results.append({"actor": r.actor, "skill": r.skill, "roll": r.roll,
-                            "skill_value": r.skill_value, "level": str(r.level),
-                            "success": r.success, "seed": r.seed,
-                            "difficulty": str(r.difficulty), "secret": secret})
-        upd: dict = {"check_results": results}
-        # 结局动作的检定失败 → 本回合不收束（decide 判定时尚未掷骰，此处按结果纠正，
-        # 防"检定失败但结局盲发"；叙事与路由随之按未收束走）
+        upd: dict = {"check_results": [_resolve_plain_check(repo, state, chk) for chk in checks]}
+        # 结局动作的检定失败 → 本回合不收束（M3-4 既有逻辑，勿丢：
+        # decide 判定时尚未掷骰，此处按结果纠正，防"检定失败但结局盲发"）
         decision = state.get("decision") or {}
-        if decision.get("ending_reached") and any(not r["success"] for r in results):
+        if decision.get("ending_reached") and any(not r["success"] for r in upd["check_results"]):
             upd["decision"] = {**decision, "ending_reached": None}
         return upd
 

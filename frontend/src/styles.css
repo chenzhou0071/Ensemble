@@ -270,6 +270,7 @@ input:focus, select:focus {
 .dice-roll.ok { color: var(--ok); }
 .dice-roll.bad { color: var(--bad); }
 .dice-level { margin-top: 8px; letter-spacing: 0.2em; color: var(--ink-soft); }
+.dice-note { margin-top: 4px; font-size: 13px; color: #9aa7b8; }
 @keyframes card-in {
   from { transform: scale(0.92); opacity: 0.4; }
   to { transform: scale(1); opacity: 1; }

@@ -32,7 +32,8 @@ _SUCCESS_LEVELS = ("critical", "extreme", "hard", "regular")
 def _dice_payload(row) -> dict:
     return {"actor": row.actor, "skill": row.skill, "skill_value": row.skill_value,
             "difficulty": row.difficulty, "roll": row.roll, "level": row.level,
-            "seed": row.seed, "success": row.level in _SUCCESS_LEVELS}
+            "seed": row.seed, "success": row.level in _SUCCESS_LEVELS,
+            "bonus": row.bonus, "penalty": row.penalty}
 
 
 def _scene_payload(session, scene_id) -> dict | None:

@@ -1,3 +1,4 @@
+import json
 import pytest
 from app.graph.nodes.turn import build_resolve_checks_node
 
@@ -76,3 +77,22 @@ def test_regular_check_defaults_to_visible(node, repo, campaign):
     assert rows[0].secret is False
     events = repo.list_events(campaign.id, campaign.active_branch_id, types=["check"])
     assert events[0].visibility == "all"
+
+
+def test_bonus_penalty_recorded_and_annotated(node, repo, campaign):
+    upd = node(base_state(campaign, decision={"checks": [
+        {"actor": "pc_1", "skill": "侦查", "difficulty": "regular",
+         "bonus": 1, "penalty": 0}]}))
+    row = upd["check_results"][0]
+    assert row["bonus"] == 1 and row["penalty"] == 0
+    rec = repo.list_dice_records(campaign.id, campaign.active_branch_id, turn_id=1)[-1]
+    assert rec.bonus == 1 and rec.penalty == 0
+    ev = repo.list_events(campaign.id, campaign.active_branch_id, types=["check"])[-1]
+    assert "奖励骰 ×1" in json.loads(ev.payload_json)["text"]
+
+
+def test_bonus_clamped_to_two(node, repo, campaign):
+    upd = node(base_state(campaign, decision={"checks": [
+        {"actor": "pc_1", "skill": "侦查", "difficulty": "regular",
+         "bonus": 9, "penalty": 0}]}))
+    assert upd["check_results"][0]["bonus"] == 2

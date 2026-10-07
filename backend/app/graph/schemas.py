@@ -9,6 +9,8 @@ class CheckRequest(BaseModel):
     skill: str
     difficulty: CheckDifficulty = CheckDifficulty.REGULAR
     secret: bool = False          # true=暗骰：玩家角色无从察觉，叙事不得直接暴露
+    bonus: int = 0      # 奖励骰数（意图参数；越界由 rules 层夹紧 ±2，不在此拒绝）
+    penalty: int = 0    # 惩罚骰数
 
 
 class NpcTrigger(BaseModel):

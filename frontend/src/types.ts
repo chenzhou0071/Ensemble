@@ -4,6 +4,7 @@ export type TokenPayload = { speaker?: string; text?: string; reset?: boolean };
 export type DicePayload = {
   actor: string; skill: string; skill_value: number; difficulty: string;
   roll: number; level: string; seed: number; success: boolean;
+  bonus?: number; penalty?: number;
 };
 export type TurnPayload = {
   phase: "resolving" | "collecting" | "ended" | "paused";

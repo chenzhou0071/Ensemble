@@ -44,4 +44,12 @@ describe("DiceOverlay", () => {
     expect(screen.getByText("12")).toBeInTheDocument();
     expect(document.querySelector(".dice-roll")?.className).toMatch(/\bok\b/);
   });
+
+  it("annotates bonus and penalty dice", () => {
+    vi.useFakeTimers();
+    render(<DiceOverlay dice={{ ...DICE, bonus: 1, penalty: 2 }} onDone={() => {}} />);
+    act(() => { vi.advanceTimersByTime(1300); });   // 定格后标注在场（标注不受 revealed 门控）
+    expect(screen.getByText(/奖励骰 ×1/)).toBeInTheDocument();
+    expect(screen.getByText(/惩罚骰 ×2/)).toBeInTheDocument();
+  });
 });

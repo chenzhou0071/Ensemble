@@ -32,6 +32,10 @@ def migrate_schema(engine: Engine) -> None:
                        "secret BOOLEAN NOT NULL DEFAULT 0")
         _ensure_column(conn, "campaign", "owner_client_id",
                        "owner_client_id VARCHAR NOT NULL DEFAULT ''")
+        _ensure_column(conn, "dicerecordrow", "bonus",
+                       "bonus INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "dicerecordrow", "penalty",
+                       "penalty INTEGER NOT NULL DEFAULT 0")
 
 
 def init_db(engine: Engine) -> None:
