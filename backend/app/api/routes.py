@@ -180,3 +180,19 @@ def campaign_module(campaign_id: str, request: Request):
             "npcs": [{"id": n.id, "name": n.name} for n in module.npcs],
             "endings": [{"id": e.id, "condition": e.condition}
                         for e in module.endings]}
+
+
+@router.get("/campaigns/{campaign_id}/usage")
+def campaign_usage(campaign_id: str, request: Request):
+    deps = _deps(request)
+    try:
+        deps.repo.get_campaign(campaign_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="campaign not found")
+    rows = deps.repo.usage_rows(campaign_id)
+    return {"totals": deps.repo.usage_totals(campaign_id),
+            "cap_usd": deps.settings.campaign_cost_cap_usd,
+            "recent": [{"turn_id": r.turn_id, "role": r.role, "model": r.model,
+                        "tokens_in": r.tokens_in, "tokens_out": r.tokens_out,
+                        "cost_usd": r.cost_usd,
+                        "created_at": r.created_at.isoformat()} for r in rows]}

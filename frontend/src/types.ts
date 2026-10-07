@@ -62,3 +62,11 @@ export type ModuleDetail = {
   npcs: { id: string; name: string }[];
   endings: { id: string; condition: string }[];
 };
+export type UsageSummary = {
+  totals: { calls: number; tokens_in: number; tokens_out: number; cost_usd: number };
+  cap_usd: number;
+  recent: {
+    turn_id: number; role: string; model: string;
+    tokens_in: number; tokens_out: number; cost_usd: number; created_at: string;
+  }[];
+};

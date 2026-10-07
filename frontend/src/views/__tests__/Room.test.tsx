@@ -21,6 +21,10 @@ vi.mock("../../api/rest", () => ({
       id: "misty_hollow", title: "迷雾幽谷",
       npcs: [{ id: "elder", name: "村长" }], endings: [],
     }),
+    usage: vi.fn().mockResolvedValue({
+      totals: { calls: 0, tokens_in: 0, tokens_out: 0, cost_usd: 0 },
+      cap_usd: 1.0, recent: [],
+    }),
   },
 }));
 
@@ -46,7 +50,7 @@ describe("Room", () => {
     expect(clientMock.connect).toHaveBeenCalled();
   });
 
-  it("shows current scene name in sidebar between character and npc panels", () => {
+  it("shows current scene name in sidebar between character and npc panels", async () => {
     render(<Room session={SESSION} onLeave={() => {}} />);
     act(() => {
       handlers.onEvent!({ seq: 1, type: "scene", visibility: "all",
@@ -55,8 +59,9 @@ describe("Room", () => {
     });
     const side = screen.getByRole("complementary");
     expect(within(side).getByText("镇中心广场")).toBeInTheDocument();
+    await within(side).findByText("成本");              // CostPanel 异步挂载（mock 已 resolve）
     const headings = [...side.querySelectorAll("h3")].map((h) => h.textContent);
-    expect(headings).toEqual(["角色", "所在位置", "已结识人物", "线索（0）", "检定记录"]);
+    expect(headings).toEqual(["角色", "所在位置", "已结识人物", "线索（0）", "检定记录", "成本"]);
   });
 
   it("disables input until collecting phase", () => {

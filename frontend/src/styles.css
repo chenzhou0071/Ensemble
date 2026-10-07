@@ -224,6 +224,8 @@ input:focus, select:focus {
 .panel li.ok { color: var(--ok); }
 .panel li.bad { color: var(--bad); }
 .muted { color: var(--ink-faint); font-size: 13px; }
+.cost-bar { height: 6px; margin: 6px 0; background: #2a3140; border-radius: 3px; overflow: hidden; }
+.cost-bar span { display: block; height: 100%; background: #8fd18f; }
 .chip {
   display: inline-block;
   margin: 2px 4px 2px 0;

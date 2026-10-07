@@ -253,6 +253,12 @@ class SqliteRepository:
                 "tokens_out": sum(r.tokens_out for r in rows),
                 "cost_usd": round(sum(r.cost_usd for r in rows), 6)}
 
+    def usage_rows(self, campaign_id: str, limit: int = 50) -> list[UsageRow]:
+        q = (select(UsageRow).where(UsageRow.campaign_id == campaign_id)
+             .order_by(UsageRow.id.desc()).limit(limit))
+        with Session(self.engine) as s:
+            return list(s.exec(q).all())
+
     # ---------- branch history ----------
 
     def branch_history_events(self, campaign_id: str, branch_id: str) -> list[GameEventRow]:

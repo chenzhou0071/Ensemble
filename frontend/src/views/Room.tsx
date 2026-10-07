@@ -5,6 +5,7 @@ import { WsClient } from "../api/ws";
 import { getClientId } from "../client";
 import CharacterPanel from "../components/CharacterPanel";
 import CluePanel from "../components/CluePanel";
+import CostPanel from "../components/CostPanel";
 import DiceLogPanel from "../components/DiceLogPanel";
 import DiceOverlay from "../components/DiceOverlay";
 import InputBar from "../components/InputBar";
@@ -84,6 +85,7 @@ export default function Room({ session, onLeave }: {
                     npcNames={npcNames} />
           <CluePanel clues={state.clues} />
           <DiceLogPanel diceLog={state.diceLog} />
+          <CostPanel campaignId={session.campaignId} />
         </aside>
       </main>
       <footer className="room-footer">
