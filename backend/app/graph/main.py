@@ -14,9 +14,9 @@ from langgraph.graph import END, START, StateGraph
 from app.graph.npc import build_npc_dispatch, build_npc_subgraph, build_npc_worker
 from app.graph.nodes.gm import build_decide_node, build_narrate_node, build_validate_node
 from app.graph.nodes.memory import build_memory_query_node
-from app.graph.nodes.turn import (build_apply_transition_node, build_intake_node,
-                                  build_post_turn_node, build_resolve_checks_node,
-                                  fallback, wait_input)
+from app.graph.nodes.turn import (build_apply_transition_node, build_combat_resolve_node,
+                                  build_intake_node, build_post_turn_node,
+                                  build_resolve_checks_node, fallback, wait_input)
 from app.graph.state import GameState
 
 logger = logging.getLogger(__name__)
@@ -53,6 +53,13 @@ def _route_after_decide(state: GameState) -> str:
 
 
 def _route_after_validate(state: GameState) -> str:
+    if state.get("error"):
+        return "fallback"
+    checks = (state.get("decision") or {}).get("checks", [])
+    return "combat_resolve" if any(c.get("target") for c in checks) else "resolve_checks"
+
+
+def _route_after_combat(state: GameState) -> str:
     return "fallback" if state.get("error") else "resolve_checks"
 
 
@@ -73,6 +80,8 @@ def build_game_graph(repo, module, memory, client, guard, checkpointer=None):
     g.add_node("intake", build_intake_node(repo, module, guard))
     g.add_node("gm_decide", build_decide_node(client, module, repo))
     g.add_node("validate", build_validate_node(client, module))
+    g.add_node("combat_resolve",
+               _guarded("combat_failed", build_combat_resolve_node(repo, module)))
     g.add_node("resolve_checks",
                _guarded("resolve_failed", build_resolve_checks_node(repo)))
     g.add_node("apply_transition", build_apply_transition_node(module))
@@ -89,6 +98,9 @@ def build_game_graph(repo, module, memory, client, guard, checkpointer=None):
     g.add_conditional_edges("gm_decide", _route_after_decide,
                             {"fallback": "fallback", "validate": "validate"})
     g.add_conditional_edges("validate", _route_after_validate,
+                            {"fallback": "fallback", "combat_resolve": "combat_resolve",
+                             "resolve_checks": "resolve_checks"})
+    g.add_conditional_edges("combat_resolve", _route_after_combat,
                             {"fallback": "fallback", "resolve_checks": "resolve_checks"})
     g.add_conditional_edges("resolve_checks", _route_after_resolve,
                             {"fallback": "fallback", "apply_transition": "apply_transition"})

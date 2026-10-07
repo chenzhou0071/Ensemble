@@ -33,6 +33,7 @@ class GameState(TypedDict, total=False):
     # L2 快照（intake 装载，回合内只读）
     scene_id: str
     npc_attitudes: dict[str, int]
+    npc_hp: dict[str, int]        # M5-7：NPC 当前 HP（intake 从 L2 快照重建；combat_resolve 写回）
     characters: dict[str, dict]
     # 预算层级（ok / tight / exceeded / paused）
     budget_level: str
@@ -41,6 +42,7 @@ class GameState(TypedDict, total=False):
     decision: dict | None
     decision_raw: str
     check_results: list[dict]
+    combat_log: list[dict]        # M5-7：本回合战斗结算记录（随 wait_input / fallback 清空）
     memory_context: str
     npc_reactions: Annotated[dict[str, dict], merge_dict]
     narration: str

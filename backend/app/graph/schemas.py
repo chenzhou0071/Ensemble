@@ -11,6 +11,7 @@ class CheckRequest(BaseModel):
     secret: bool = False          # true=暗骰：玩家角色无从察觉，叙事不得直接暴露
     bonus: int = 0      # 奖励骰数（意图参数；越界由 rules 层夹紧 ±2，不在此拒绝）
     penalty: int = 0    # 惩罚骰数
+    target: str | None = None     # 攻击目标 NPC id（限当前场景且含 combat 块；validate 负责规范化/降级）
 
 
 class NpcTrigger(BaseModel):

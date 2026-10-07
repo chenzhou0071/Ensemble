@@ -132,3 +132,14 @@ def test_graph_ends_on_ending(repo, campaign, mini_module):
     snap = graph.get_state(cfg)
     assert snap.next == ()                       # 结局：图结束，不再开输入窗口
     assert snap.values["ending_reached"] == "e1"
+
+
+def test_validate_keeps_target_without_scene(campaign):
+    module = Module.model_validate(MODULE_WITH_CLUE)
+    raw = '{"intent_summary": "x", "checks": [{"actor": "pc_1", "skill": "格斗", "target": "ghost"}]}'
+    client, built = make_client([])
+    upd = build_validate_node(client, module)({
+        "decision_raw": raw, "budget_level": "ok", "campaign_id": "c",
+        "branch_id": "c@main", "turn_id": 1})
+    assert upd["error"] is None
+    assert upd["decision"]["checks"][0]["target"] == "ghost"   # 无 scene_id：target 原样保留

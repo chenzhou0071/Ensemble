@@ -14,7 +14,7 @@ DECIDE_SYSTEM = (
     "你是跑团主持人（COC 风格）。基于玩家行动与当前场景做结构化裁决，"
     "只输出一个 JSON 对象（不要 markdown 代码块、不要任何解释文字），字段：\n"
     'intent_summary(str，一句话概括玩家意图)、'
-    'checks(数组，元素 {"actor","skill","difficulty"(regular|hard|extreme),"secret"(bool，可选，默认 false),"bonus"(int，可选，0-2，默认 0),"penalty"(int，可选，0-2，默认 0)})、'
+    'checks(数组，元素 {"actor","skill","difficulty"(regular|hard|extreme),"secret"(bool，可选，默认 false),"bonus"(int，可选，0-2，默认 0),"penalty"(int，可选，0-2，默认 0),"target"(str，可选，攻击目标 NPC 的 id)})、'
     'proactive_npc_triggers(数组，元素 {"npc_id","trigger"})、'
     'scene_transition(null 或 {"to_scene","reason"})、'
     'clues_revealed(数组，元素为线索 id，仅当本回合玩家明确获得线索时填写)、'
@@ -31,7 +31,8 @@ DECIDE_SYSTEM = (
     "7. 开场回合可以引入场面与 NPC，但不要要求检定；\n"
     "8. 玩家与 NPC 的社交行动即使检定失败，也要让该 NPC 在场回应（冷淡、回避、暗示皆可），不得让场面停滞或写成拒绝交流。\n"
     "9. secret=true 表示玩家角色无从察觉的暗骰（如暗中进行的观察或聆听）；其检定与结果不得在叙事中直接暴露。\n"
-    "10. 奖励/惩罚骰（bonus/penalty）仅在情境明显有利/不利时给出（如充分准备、恶劣环境），各最多 2，默认省略。"
+    "10. 奖励/惩罚骰（bonus/penalty）仅在情境明显有利/不利时给出（如充分准备、恶劣环境），各最多 2，默认省略。\n"
+    "11. target 仅在玩家攻击当前场景内某个 NPC 时填写（被攻击者必须可被攻击），其余检定不要填 target。"
 )
 
 
@@ -139,6 +140,27 @@ def build_validate_node(client: LLMClient, module=None) -> Callable[[GameState],
                 return f"未知结局 id：{decision.ending_reached}（可用：{sorted(known_endings)}）"
         return None
 
+    def _normalize_targets(decision, state: GameState) -> None:
+        """非法/已败亡的攻击目标就地降级为普通检定（不触发 repair）；无 module/场景信息时跳过。"""
+        if module is None:
+            return
+        try:
+            scene = module.scene(state.get("scene_id", ""))
+        except KeyError:
+            return
+        npc_hp = state.get("npc_hp") or {}
+        for chk in decision.checks:
+            if chk.target is None:
+                continue
+            try:
+                npc = module.npc(chk.target)
+            except KeyError:
+                chk.target = None
+                continue
+            if (npc.combat is None or chk.target not in scene.npcs
+                    or int(npc_hp.get(chk.target, 1)) <= 0):
+                chk.target = None
+
     def validate_decision(state: GameState) -> dict:
         raw = state.get("decision_raw", "")
         repair_msg = ""
@@ -147,6 +169,7 @@ def build_validate_node(client: LLMClient, module=None) -> Callable[[GameState],
                 decision = parse_decision_json(raw)
                 ref_error = _check_refs(decision)
                 if ref_error is None:
+                    _normalize_targets(decision, state)
                     return {"decision": decision.model_dump(mode="json"), "error": None}
                 repair_msg = ref_error
             except Exception as exc:
@@ -229,6 +252,22 @@ def _reaction_lines(state: GameState, module) -> str:
     return "\n".join(lines) or "（本回合无 NPC 回应）"
 
 
+def _combat_lines(state: GameState) -> str:
+    lines = []
+    for c in state.get("combat_log", []):
+        atk, dfn = c.get("attack", {}), c.get("defense", {})
+        if c.get("hit"):
+            outcome = f"命中，伤害 {c['damage']}（HP {c['hp_before']}→{c['hp_after']}）"
+            if c.get("hp_after") == 0:
+                outcome += "，目标倒下（败亡）"
+        else:
+            outcome = "未命中"
+        lines.append(f"- {c['name']}（{c['npc_id']}）：{outcome}；"
+                     f"攻击 {atk.get('roll')}/{atk.get('skill_value')} → {atk.get('level')}，"
+                     f"闪避 {dfn.get('roll')}/{dfn.get('skill_value')} → {dfn.get('level')}")
+    return "\n".join(lines)
+
+
 def _previous_narration_tail(state: GameState, repo) -> str:
     """上一回合叙事结尾（接续锚点）：防止每回合从头铺垫环境导致重复。"""
     if repo is None:
@@ -283,6 +322,8 @@ def build_narrate_node(client: LLMClient, module, repo=None) -> Callable[[GameSt
         prev_line = _previous_narration_tail(state, repo)
         tail_instr = ("请接着开场白写下去（从玩家进入当前场景开始），不要复述开场白。"
                       if opener else "请输出本回合的完整叙事。")
+        combat_lines = _combat_lines(state)
+        combat_block = f"战斗结算：\n{combat_lines}\n" if combat_lines else ""
         user = (
             f"{opening_line}"
             f"{ending_line}"
@@ -290,6 +331,7 @@ def build_narrate_node(client: LLMClient, module, repo=None) -> Callable[[GameSt
             f"当前场景：{scene.name}\n{scene.description}\n"
             f"玩家行动：\n{inputs_txt}\n"
             f"检定结果：\n{_check_lines(state)}\n"
+            f"{combat_block}"
             f"NPC 反应：\n{_reaction_lines(state, module)}\n"
             f"{clue_line}"
             f"{tail_instr}"
