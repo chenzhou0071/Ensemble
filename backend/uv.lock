@@ -336,6 +336,9 @@ dependencies = [
 graph = [
     { name = "graphiti-core" },
 ]
+observability = [
+    { name = "langsmith" },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -351,13 +354,14 @@ requires-dist = [
     { name = "graphiti-core", marker = "extra == 'graph'", specifier = ">=0.5" },
     { name = "langgraph" },
     { name = "langgraph-checkpoint-sqlite" },
+    { name = "langsmith", marker = "extra == 'observability'", specifier = ">=0.1.100" },
     { name = "openai" },
     { name = "pydantic", specifier = ">=2" },
     { name = "pyyaml" },
     { name = "sqlmodel" },
     { name = "uvicorn", extras = ["standard"] },
 ]
-provides-extras = ["graph"]
+provides-extras = ["graph", "observability"]
 
 [package.metadata.requires-dev]
 dev = [

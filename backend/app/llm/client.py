@@ -7,6 +7,7 @@ from pydantic import BaseModel
 
 from app.config import Pricing, Settings
 from app.llm.usage import BudgetGuard, BudgetLevel
+from app.obs.tracer import Tracer
 
 Role = Literal["gm", "npc", "extractor"]
 
@@ -147,12 +148,30 @@ def make_repo_budget_probe(repo, guard: BudgetGuard) -> Callable[[LlmContext], s
 class LLMClient:
     def __init__(self, settings: Settings, pricing: Pricing,
                  usage_sink: UsageSink | None = None, model_factory: ModelFactory | None = None,
-                 budget_probe: Callable[[LlmContext], str] | None = None):
+                 budget_probe: Callable[[LlmContext], str] | None = None,
+                 tracer: Tracer | None = None):
         self._settings = settings
         self._pricing = pricing
         self._usage_sink = usage_sink
         self._factory: ModelFactory = model_factory or _make_cached_factory(settings)
         self._budget_probe = budget_probe
+        self._tracer = tracer
+
+    def _start_llm_run(self, role: Role, messages: list[ChatMessage], model: str,
+                       cheap: bool) -> str | None:
+        if self._tracer is None:
+            return None
+        return self._tracer.start_run(
+            name=f"llm:{role}", run_type="llm",
+            inputs={"role": role, "model": model, "cheap": cheap,
+                    "messages": [{"role": m.role, "content": m.content}
+                                 for m in messages]},
+            parent_run_id=self._tracer.current_turn_run_id)
+
+    def _finish_llm_run(self, run_id: str | None, outputs: dict | None = None,
+                        error: str | None = None) -> None:
+        if self._tracer is not None and run_id is not None:
+            self._tracer.finish_run(run_id, outputs=outputs, error=error)
 
     def chat(self, role: Role, messages: list[ChatMessage], ctx: LlmContext,
              cheap: bool = False) -> str:
@@ -165,19 +184,29 @@ class LLMClient:
                 cheap = True
         model, base_url, api_key = self._resolve(role, cheap)
         model_obj = self._factory(model, base_url, api_key)
+        run_id = self._start_llm_run(role, messages, model, cheap)
         start = time.perf_counter()
-        resp = model_obj.chat(messages)
+        try:
+            resp = model_obj.chat(messages)
+        except Exception as exc:
+            self._finish_llm_run(run_id, error=str(exc))
+            raise
         latency_ms = int((time.perf_counter() - start) * 1000)
         cost = compute_cost(self._pricing, model, resp.tokens_in, resp.tokens_out)
         if self._usage_sink is not None:
             self._usage_sink.record_usage(ctx.campaign_id, ctx.branch_id, ctx.turn_id,
                                           role, model, resp.tokens_in, resp.tokens_out,
                                           cost, latency_ms)
+        self._finish_llm_run(run_id, outputs={"text": resp.text,
+                                              "tokens_in": resp.tokens_in,
+                                              "tokens_out": resp.tokens_out,
+                                              "latency_ms": latency_ms,
+                                              "cost_usd": cost})
         return resp.text
 
     def chat_stream(self, role: Role, messages: list[ChatMessage], ctx: LlmContext,
                     cheap: bool = False) -> Iterator[str]:
-        """流式输出；流正常结束后记一次账（消费方中途放弃则不记账）。
+        """流式输出；流正常结束后记一次账（消费方中途放弃则不记账、不落 trace）。
 
         与 chat 同规则：调用前经检查点②探针（exceeded 自动降档、paused 拒绝）。
         """
@@ -191,10 +220,17 @@ class LLMClient:
         model_obj = self._factory(model, base_url, api_key)
         usage = StreamUsage()
         chars = 0
+        parts: list[str] = []
+        run_id = self._start_llm_run(role, messages, model, cheap)
         start = time.perf_counter()
-        for delta in model_obj.chat_stream(messages, usage):
-            chars += len(delta)
-            yield delta
+        try:
+            for delta in model_obj.chat_stream(messages, usage):
+                chars += len(delta)
+                parts.append(delta)
+                yield delta
+        except Exception as exc:
+            self._finish_llm_run(run_id, error=str(exc))
+            raise
         latency_ms = int((time.perf_counter() - start) * 1000)
         if usage.tokens_in == 0:
             usage.tokens_in = max(1, sum(len(m.content) for m in messages) // 2)
@@ -205,6 +241,11 @@ class LLMClient:
             self._usage_sink.record_usage(ctx.campaign_id, ctx.branch_id, ctx.turn_id,
                                           role, model, usage.tokens_in, usage.tokens_out,
                                           cost, latency_ms)
+        self._finish_llm_run(run_id, outputs={"text": "".join(parts),
+                                              "tokens_in": usage.tokens_in,
+                                              "tokens_out": usage.tokens_out,
+                                              "latency_ms": latency_ms,
+                                              "cost_usd": cost})
 
     def _resolve(self, role: Role, cheap: bool) -> tuple[str, str | None, str | None]:
         if role == "gm":

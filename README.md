@@ -172,6 +172,37 @@ cd frontend; npm run test             # 前端组件 / 状态层测试
 | `ENSEMBLE_CAMPAIGN_COST_CAP_USD` | `10.0` | 战役成本上限（熔断暂停） |
 | `DASHSCOPE_API_KEY` / `DEEPSEEK_API_KEY` | 无 | 模型密钥 |
 
+## M5 增强（可选能力）
+
+### 本地追踪（JSONL，默认关闭）
+
+```bash
+cd backend
+$env:ENSEMBLE_TRACES_DIR="../.traces"     # PowerShell；bash 用 export
+uv run python -m app.cli play <campaign_id> <module_path>
+```
+
+`../.traces/traces.jsonl` 每行一个完整 run（`turn:*` 回合 / `llm:{role}` 模型调用），
+字段与 LangSmith run 对齐：`run_id / parent_run_id / name / run_type / inputs / outputs / start_time / end_time / error`。
+中途失败/放弃的调用不会留下断头 run。
+
+### LangSmith 云追踪（零代码）
+
+```bash
+cd backend
+uv sync --extra observability
+$env:LANGSMITH_TRACING="true"; $env:LANGSMITH_API_KEY="lsv2_..."; $env:LANGSMITH_PROJECT="ensemble"
+uv run python -m app.cli play <campaign_id> <module_path>
+```
+
+openai SDK 检测到 langsmith 与开关后自动上报，无需代码改动；跑两回合后在 Smith 项目里可见调用链与耗时。
+（若所用版本未自动挂钩，按 LangSmith 官方 openai 集成文档处理；本地 JSONL 路径始终可用。）
+
+### 记忆后端切换
+
+`ENSEMBLE_MEMORY_BACKEND=graphiti` 时需要 `uv sync --extra graph` 与 Neo4j（连接参数见 `.env.example`）；
+初始化失败会回退 journal 并在日志中告警。
+
 ## 设计文档
 
 - 设计规格 `docs/superpowers/specs/`：

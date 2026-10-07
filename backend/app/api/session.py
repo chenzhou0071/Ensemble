@@ -21,6 +21,7 @@ from app.llm.usage import BudgetGuard
 from app.memory.graphiti import build_memory
 from app.memory.scheduler import BackgroundSummaries
 from app.memory.summarizer import LLMSummarizer
+from app.obs.tracer import Tracer, make_tracer
 from app.storage.repo import SqliteRepository
 from app.tasks import BackgroundQueue
 
@@ -62,6 +63,7 @@ class RoomSession:
     last_scene_id: int = 0
     last_dice_id: int = 0
     drive_task: asyncio.Task | None = None
+    tracer: Tracer | None = None
 
     @property
     def config(self) -> dict:
@@ -94,9 +96,11 @@ class SessionManager:
         module = load_module(find_module_path(deps.settings.modules_dir,
                                               campaign.module_id))
         guard = BudgetGuard(deps.settings)
+        tracer = make_tracer(deps.settings)
         client = LLMClient(deps.settings, load_pricing(deps.settings.pricing_path),
                            usage_sink=deps.repo, model_factory=deps.model_factory,
-                           budget_probe=make_repo_budget_probe(deps.repo, guard))
+                           budget_probe=make_repo_budget_probe(deps.repo, guard),
+                           tracer=tracer)
         journal = build_memory(deps.settings, deps.repo, summarizer=LLMSummarizer(client))
         queue = BackgroundQueue(lambda key, payload: journal.update_summaries(*payload),
                                 name="summary")
@@ -109,7 +113,7 @@ class SessionManager:
             module=module, graph=graph, queue=queue,
             bus=EventBus(replay_size=deps.settings.ws_replay_size),
             buffer=TurnBuffer(),
-            branch_id=campaign.active_branch_id)
+            branch_id=campaign.active_branch_id, tracer=tracer)
         self._sessions[campaign_id] = session
         return session
 
@@ -195,13 +199,24 @@ class SessionManager:
 
     async def _drive(self, session: RoomSession, inp) -> None:
         snap0 = session.graph.get_state(session.config)
-        session.bus.push("turn", {"phase": "resolving",
-                                  "turn_id": int((snap0.values or {}).get("turn_id", 0))})
+        turn_id0 = int((snap0.values or {}).get("turn_id", 0))
+        session.bus.push("turn", {"phase": "resolving", "turn_id": turn_id0})
         loop = asyncio.get_running_loop()
+        tracer = session.tracer
+        run_id: str | None = None
+        started = time.perf_counter()
+        if tracer is not None:
+            run_id = tracer.start_run(name=f"turn:{turn_id0}", run_type="chain",
+                                      inputs={"campaign_id": session.campaign_id,
+                                              "branch_id": session.branch_id,
+                                              "turn_id": turn_id0})
+            tracer.current_turn_run_id = run_id
+        drive_error: str | None = None
 
         def _run() -> None:
             # 同步 stream 在 executor 线程执行（SqliteSaver 不支持 async 图接口）；
             # chunk 经 call_soon_threadsafe 回投事件循环，由 bus 分发。
+            nonlocal drive_error
             try:
                 for chunk in session.graph.stream(inp, session.config,
                                                   stream_mode="custom"):
@@ -213,10 +228,20 @@ class SessionManager:
                         loop.call_soon_threadsafe(self._push_dice, session,
                                                   dict(chunk["dice"]))
             except Exception as exc:  # 图执行意外崩溃：提示但保留会话（可重连续玩）
+                drive_error = str(exc)
                 loop.call_soon_threadsafe(
                     session.bus.push, "error", {"message": f"图执行失败：{exc}"})
 
         await asyncio.to_thread(_run)
+        if tracer is not None and run_id is not None:
+            values = (session.graph.get_state(session.config).values) or {}
+            tracer.finish_run(run_id, outputs={
+                "turn_id": int(values.get("turn_id", turn_id0)),
+                "latency_ms": int((time.perf_counter() - started) * 1000),
+                "npc_count": len(values.get("npc_reactions") or {}),
+                "degraded": dict(values.get("degraded") or {}),
+                "error": drive_error})
+            tracer.current_turn_run_id = None
         self._push_snapshot(session)
 
     def _push_dice(self, session: RoomSession, payload: dict) -> None:

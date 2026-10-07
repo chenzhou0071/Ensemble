@@ -52,6 +52,7 @@ class Settings(BaseModel):
     neo4j_uri: str = "bolt://localhost:7687"
     neo4j_user: str = "neo4j"
     neo4j_password: str | None = None
+    traces_dir: str = ""                      # 空 = 关闭本地 JSONL 追踪
     enable_thinking: bool = False   # qwen 系思考模式：要快+省，默认关（ENSEMBLE_ENABLE_THINKING=1 开启）
     modules_dir: str = "../modules"
     cors_origins: str = "http://localhost:5173"
@@ -76,4 +77,5 @@ def load_settings() -> Settings:
         neo4j_uri=os.environ.get("NEO4J_URI", "bolt://localhost:7687"),
         neo4j_user=os.environ.get("NEO4J_USER", "neo4j"),
         neo4j_password=os.environ.get("NEO4J_PASSWORD"),
+        traces_dir=os.environ.get("ENSEMBLE_TRACES_DIR", ""),
     )

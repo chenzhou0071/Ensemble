@@ -14,6 +14,7 @@ from app.llm.usage import BudgetGuard
 from app.memory.graphiti import build_memory
 from app.memory.scheduler import BackgroundSummaries
 from app.memory.summarizer import LLMSummarizer
+from app.obs.tracer import make_tracer
 from app.rules.character import make_default_character
 from app.storage.db import init_db, make_engine
 from app.storage.repo import SqliteRepository
@@ -48,7 +49,8 @@ def assemble(settings: Settings, module_path: str | Path) -> AppContext:
     pricing = load_pricing(resolve_resource_path(settings.pricing_path))
     guard = BudgetGuard(settings)
     client = LLMClient(settings, pricing, usage_sink=repo,
-                       budget_probe=make_repo_budget_probe(repo, guard))
+                       budget_probe=make_repo_budget_probe(repo, guard),
+                       tracer=make_tracer(settings))
     memory = build_memory(settings, repo, summarizer=LLMSummarizer(client))
     queue = BackgroundQueue(lambda key, payload: memory.update_summaries(*payload),
                             name="summary")
