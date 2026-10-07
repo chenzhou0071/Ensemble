@@ -11,7 +11,7 @@ from app.content.loader import load_module
 from app.graph.main import build_checkpointer, build_game_graph
 from app.llm.client import LLMClient, make_repo_budget_probe
 from app.llm.usage import BudgetGuard
-from app.memory.journal import JournalMemory
+from app.memory.graphiti import build_memory
 from app.memory.scheduler import BackgroundSummaries
 from app.memory.summarizer import LLMSummarizer
 from app.rules.character import make_default_character
@@ -30,7 +30,7 @@ class AppContext:
     module: object
     client: LLMClient | None
     guard: BudgetGuard | None
-    memory: JournalMemory | None
+    memory: object | None
     graph: object
     queue: BackgroundQueue | None = None      # 摘要后台队列（Task 18b）
 
@@ -49,7 +49,7 @@ def assemble(settings: Settings, module_path: str | Path) -> AppContext:
     guard = BudgetGuard(settings)
     client = LLMClient(settings, pricing, usage_sink=repo,
                        budget_probe=make_repo_budget_probe(repo, guard))
-    memory = JournalMemory(repo, summarizer=LLMSummarizer(client))
+    memory = build_memory(settings, repo, summarizer=LLMSummarizer(client))
     queue = BackgroundQueue(lambda key, payload: memory.update_summaries(*payload),
                             name="summary")
     queue.start()

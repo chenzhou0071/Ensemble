@@ -18,7 +18,7 @@ from app.content.registry import find_module_path
 from app.graph.main import build_checkpointer, build_game_graph
 from app.llm.client import LLMClient, make_repo_budget_probe
 from app.llm.usage import BudgetGuard
-from app.memory.journal import JournalMemory
+from app.memory.graphiti import build_memory
 from app.memory.scheduler import BackgroundSummaries
 from app.memory.summarizer import LLMSummarizer
 from app.storage.repo import SqliteRepository
@@ -97,7 +97,7 @@ class SessionManager:
         client = LLMClient(deps.settings, load_pricing(deps.settings.pricing_path),
                            usage_sink=deps.repo, model_factory=deps.model_factory,
                            budget_probe=make_repo_budget_probe(deps.repo, guard))
-        journal = JournalMemory(deps.repo, summarizer=LLMSummarizer(client))
+        journal = build_memory(deps.settings, deps.repo, summarizer=LLMSummarizer(client))
         queue = BackgroundQueue(lambda key, payload: journal.update_summaries(*payload),
                                 name="summary")
         queue.start()

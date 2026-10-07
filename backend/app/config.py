@@ -48,6 +48,10 @@ class Settings(BaseModel):
     request_timeout_seconds: int = 60
     turn_token_cap: int = 30000
     campaign_cost_cap_usd: float = 10.0
+    memory_backend: str = "journal"           # journal | graphiti
+    neo4j_uri: str = "bolt://localhost:7687"
+    neo4j_user: str = "neo4j"
+    neo4j_password: str | None = None
     enable_thinking: bool = False   # qwen 系思考模式：要快+省，默认关（ENSEMBLE_ENABLE_THINKING=1 开启）
     modules_dir: str = "../modules"
     cors_origins: str = "http://localhost:5173"
@@ -68,4 +72,8 @@ def load_settings() -> Settings:
         turn_token_cap=int(os.environ.get("ENSEMBLE_TURN_TOKEN_CAP", "30000")),
         campaign_cost_cap_usd=float(os.environ.get("ENSEMBLE_CAMPAIGN_COST_CAP_USD", "10.0")),
         enable_thinking=os.environ.get("ENSEMBLE_ENABLE_THINKING", "").lower() in ("1", "true"),
+        memory_backend=os.environ.get("ENSEMBLE_MEMORY_BACKEND", "journal"),
+        neo4j_uri=os.environ.get("NEO4J_URI", "bolt://localhost:7687"),
+        neo4j_user=os.environ.get("NEO4J_USER", "neo4j"),
+        neo4j_password=os.environ.get("NEO4J_PASSWORD"),
     )

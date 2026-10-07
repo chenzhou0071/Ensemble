@@ -11,6 +11,9 @@ dependencies = [
 [project.scripts]
 ensemble = "app.cli:main"
 
+[project.optional-dependencies]
+graph = ["graphiti-core>=0.5"]
+
 [dependency-groups]
 dev = ["pytest", "pytest-cov", "httpx", "pytest-asyncio"]
 
