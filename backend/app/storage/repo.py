@@ -240,6 +240,18 @@ class SqliteRepository:
             rows = s.exec(q).all()
         return round(sum(r.cost_usd for r in rows), 6)
 
+    def usage_totals(self, campaign_id: str | None = None) -> dict:
+        """用量汇总；campaign_id 为空时全库（/metrics），否则限单战役（M5-5 usage API）。"""
+        q = select(UsageRow)
+        if campaign_id is not None:
+            q = q.where(UsageRow.campaign_id == campaign_id)
+        with Session(self.engine) as s:
+            rows = s.exec(q).all()
+        return {"calls": len(rows),
+                "tokens_in": sum(r.tokens_in for r in rows),
+                "tokens_out": sum(r.tokens_out for r in rows),
+                "cost_usd": round(sum(r.cost_usd for r in rows), 6)}
+
     # ---------- branch history ----------
 
     def branch_history_events(self, campaign_id: str, branch_id: str) -> list[GameEventRow]:

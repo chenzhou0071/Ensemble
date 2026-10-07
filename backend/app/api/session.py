@@ -21,6 +21,7 @@ from app.llm.usage import BudgetGuard
 from app.memory.graphiti import build_memory
 from app.memory.scheduler import BackgroundSummaries
 from app.memory.summarizer import LLMSummarizer
+from app.obs.counters import get_counters
 from app.obs.tracer import Tracer, make_tracer
 from app.storage.repo import SqliteRepository
 from app.tasks import BackgroundQueue
@@ -233,12 +234,15 @@ class SessionManager:
                     session.bus.push, "error", {"message": f"图执行失败：{exc}"})
 
         await asyncio.to_thread(_run)
+        values = (session.graph.get_state(session.config).values) or {}
+        latency_ms = int((time.perf_counter() - started) * 1000)
+        npc_count = len(values.get("npc_reactions") or {})
+        get_counters().record_turn(latency_ms, npc_count)     # 无 tracer 也计数
         if tracer is not None and run_id is not None:
-            values = (session.graph.get_state(session.config).values) or {}
             tracer.finish_run(run_id, outputs={
                 "turn_id": int(values.get("turn_id", turn_id0)),
-                "latency_ms": int((time.perf_counter() - started) * 1000),
-                "npc_count": len(values.get("npc_reactions") or {}),
+                "latency_ms": latency_ms,
+                "npc_count": npc_count,
                 "degraded": dict(values.get("degraded") or {}),
                 "error": drive_error})
             tracer.current_turn_run_id = None

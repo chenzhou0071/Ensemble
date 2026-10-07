@@ -7,6 +7,7 @@ from app.graph.narrative import IncrementalSegmenter, parse_segments, stream_wri
 from app.graph.schemas import parse_decision_json
 from app.graph.state import GameState
 from app.llm.client import ChatMessage, LLMClient, LlmContext
+from app.obs.counters import get_counters
 
 DECIDE_SYSTEM = (
     "你是跑团主持人（COC 风格）。基于玩家行动与当前场景做结构化裁决，"
@@ -162,6 +163,7 @@ def build_validate_node(client: LLMClient, module=None) -> Callable[[GameState],
             except Exception as exc:
                 repair_msg = str(exc)
                 break  # 请求本身失败：无可修复
+        get_counters().record_fallback("decision_invalid")
         return {"error": "decision_invalid", "decision": None,
                 "degraded": {"decision_invalid": True}}
 
@@ -323,6 +325,7 @@ def build_narrate_node(client: LLMClient, module, repo=None) -> Callable[[GameSt
                 role="user",
                 content=f"上次输出不合格（{last_error}）。请重新输出完整叙事，"
                         "NPC 台词必须带 [[npc:id]] 标记。")]
+        get_counters().record_fallback("narrate_failed")
         return {"error": "narrate_failed", "degraded": {"narrate_failed": True},
                 "narration": "", "narration_segments": []}
 

@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.session import SessionManager
 from app.config import Settings
+from app.obs.counters import get_counters
 from app.storage.repo import SqliteRepository
 
 
@@ -40,5 +41,12 @@ def create_app(deps: AppDeps) -> FastAPI:
     @app.get("/healthz")
     def healthz():
         return {"status": "ok"}
+
+    @app.get("/metrics")
+    def metrics():
+        snapshot = get_counters().snapshot()
+        snapshot["scope"] = "process"          # 进程内计数器：重启清零，非持久化
+        snapshot["usage"] = deps.repo.usage_totals()
+        return snapshot
 
     return app

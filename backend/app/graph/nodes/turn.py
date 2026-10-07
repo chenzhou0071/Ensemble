@@ -6,6 +6,7 @@ from langgraph.types import interrupt
 from app.graph.narrative import stream_writer
 from app.graph.state import GameState
 from app.memory.base import MemoryEvent
+from app.obs.counters import get_counters
 from app.rules.attitude import apply_attitude_deltas
 from app.rules.check import CheckDifficulty, roll_check
 from app.rules.dice import new_seed
@@ -35,6 +36,7 @@ def build_intake_node(repo, module, guard):
                      "is_opening": is_opening, "budget_level": level, "error": None}
         if level == "paused":
             upd["error"] = "budget_paused"
+            get_counters().record_fallback("budget_paused")
         return upd
 
     return intake

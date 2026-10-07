@@ -11,6 +11,7 @@ from langgraph.types import Send
 
 from app.graph.state import GameState
 from app.llm.client import ChatMessage, LLMClient, LlmContext
+from app.obs.counters import get_counters
 
 NPC_SYSTEM = (
     "你是一位跑团（TRPG）中的 NPC，只以你的身份说话和行动，用中文回应。\n"
@@ -147,6 +148,7 @@ def build_npc_worker(subgraph) -> Callable[[dict], dict]:
             final = subgraph.invoke(dict(task))
             reaction = final.get("reaction") or {}
         except Exception:
+            get_counters().record_fallback("npc_silent")
             reaction = {}  # 单个 NPC 失败 → 沉默占位（规格 §8），其余 NPC 不受影响
         if not reaction.get("npc_id"):
             reaction = {"npc_id": npc_id, "speech": str(reaction.get("speech", "")),

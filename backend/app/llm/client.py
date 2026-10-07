@@ -7,6 +7,7 @@ from pydantic import BaseModel
 
 from app.config import Pricing, Settings
 from app.llm.usage import BudgetGuard, BudgetLevel
+from app.obs.counters import get_counters
 from app.obs.tracer import Tracer
 
 Role = Literal["gm", "npc", "extractor"]
@@ -189,6 +190,7 @@ class LLMClient:
         try:
             resp = model_obj.chat(messages)
         except Exception as exc:
+            get_counters().record_llm(ok=False)
             self._finish_llm_run(run_id, error=str(exc))
             raise
         latency_ms = int((time.perf_counter() - start) * 1000)
@@ -202,6 +204,7 @@ class LLMClient:
                                               "tokens_out": resp.tokens_out,
                                               "latency_ms": latency_ms,
                                               "cost_usd": cost})
+        get_counters().record_llm(ok=True)
         return resp.text
 
     def chat_stream(self, role: Role, messages: list[ChatMessage], ctx: LlmContext,
@@ -229,6 +232,7 @@ class LLMClient:
                 parts.append(delta)
                 yield delta
         except Exception as exc:
+            get_counters().record_llm(ok=False)
             self._finish_llm_run(run_id, error=str(exc))
             raise
         latency_ms = int((time.perf_counter() - start) * 1000)
@@ -246,6 +250,7 @@ class LLMClient:
                                               "tokens_out": usage.tokens_out,
                                               "latency_ms": latency_ms,
                                               "cost_usd": cost})
+        get_counters().record_llm(ok=True)
 
     def _resolve(self, role: Role, cheap: bool) -> tuple[str, str | None, str | None]:
         if role == "gm":
