@@ -34,15 +34,36 @@ describe("Lobby", () => {
     const onEnter = vi.fn();
     render(<Lobby onEnter={onEnter} />);
     await screen.findByText("迷雾幽谷");
+    await userEvent.type(screen.getByLabelText("战役名"), "夜探听雨楼");
+    await userEvent.type(screen.getByLabelText("玩家名"), "沈青");
     await userEvent.click(screen.getByText("开始跑团"));
     await waitFor(() =>
       expect(onEnter).toHaveBeenCalledWith({
-        campaignId: "c1", playerId: "p1", title: "迷雾山谷",
+        campaignId: "c1", playerId: "p1", title: "夜探听雨楼",
       }),
     );
     expect(mocked.campaigns).toHaveBeenCalledWith("test-client");
     expect(mocked.createCampaign).toHaveBeenCalledWith(
-      "misty_hollow", "迷雾山谷", "调查员", "test-client");
+      "misty_hollow", "夜探听雨楼", "沈青", "test-client");
+  });
+
+  it("starts empty and blocks start until both names are filled", async () => {
+    render(<Lobby onEnter={vi.fn()} />);
+    await screen.findByText("迷雾幽谷");
+    const start = screen.getByRole("button", { name: "开始跑团" });
+    const title = screen.getByLabelText("战役名");
+    const playerName = screen.getByLabelText("玩家名");
+    expect(title).toHaveValue("");
+    expect(playerName).toHaveValue("");
+    expect(start).toBeDisabled();
+
+    await userEvent.type(title, "   ");
+    expect(start).toBeDisabled();          // 纯空白不算填写
+    await userEvent.clear(title);
+    await userEvent.type(title, "夜探听雨楼");
+    expect(start).toBeDisabled();          // 只填了战役名
+    await userEvent.type(playerName, "沈青");
+    expect(start).toBeEnabled();
   });
 
   it("continues an existing campaign using its first player", async () => {

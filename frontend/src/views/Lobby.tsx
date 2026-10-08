@@ -9,8 +9,8 @@ export default function Lobby({ onEnter }: { onEnter: (s: Session) => void }) {
   const [modules, setModules] = useState<ModuleInfo[]>([]);
   const [campaigns, setCampaigns] = useState<CampaignInfo[]>([]);
   const [moduleId, setModuleId] = useState("");
-  const [title, setTitle] = useState("迷雾山谷");
-  const [playerName, setPlayerName] = useState("调查员");
+  const [title, setTitle] = useState("");
+  const [playerName, setPlayerName] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -25,12 +25,14 @@ export default function Lobby({ onEnter }: { onEnter: (s: Session) => void }) {
   }, []);
 
   async function create() {
-    if (!moduleId || busy) return;
+    const t = title.trim();
+    const p = playerName.trim();
+    if (!moduleId || busy || !t || !p) return;
     setBusy(true);
     setError(null);
     try {
-      const r = await api.createCampaign(moduleId, title, playerName, getClientId());
-      onEnter({ campaignId: r.campaign_id, playerId: r.player_id, title });
+      const r = await api.createCampaign(moduleId, t, p, getClientId());
+      onEnter({ campaignId: r.campaign_id, playerId: r.player_id, title: t });
     } catch (e) {
       setError(String(e));
     } finally {
@@ -76,7 +78,10 @@ export default function Lobby({ onEnter }: { onEnter: (s: Session) => void }) {
           玩家名
           <input value={playerName} onChange={(e) => setPlayerName(e.target.value)} />
         </label>
-        <button onClick={create} disabled={busy || !moduleId}>开始跑团</button>
+        <button onClick={create}
+                disabled={busy || !moduleId || !title.trim() || !playerName.trim()}>
+          开始跑团
+        </button>
       </section>
       <section>
         <h2>存档</h2>
